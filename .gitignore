@@ -1,0 +1,121 @@
+# ==============================================================================
+# 📦 DEPENDENCY DIRECTORIES & PACKAGES (डिपेंडेंसीज और पैकेजेस)
+# ==============================================================================
+node_modules/
+/jspm_packages/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# ==============================================================================
+# 🔑 SECURITY, ENVIRONMENT & SECRETS (सीक्रेट कीज़, टोकन्स और क्रेडेंशियल्स)
+# ==============================================================================
+.env
+.env.*
+*.env
+config/*.env
+config/config.env
+config.env
+.env.local
+.env.*.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production
+.env.production.local
+.env.sample
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+id_rsa
+secring.gpg
+
+# ==============================================================================
+# 📊 LOGS, DIAGNOSTICS & RUNTIME (लॉग फाइल्स, क्रैश रिपोर्ट्स और परफॉरमेंस डेटा)
+# ==============================================================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-debug.log*
+core
+*.core
+*.pid
+*.seed
+*.pid.lock
+
+# ==============================================================================
+# 📂 TEMPORARY, CACHE & SYSTEM TRASH (टेम्प, कैश और ऑपरेटिंग सिस्टम का कचरा)
+# ==============================================================================
+.tmp/
+.temp/
+*.tmp
+*.temp
+*.swp
+*~
+.sass-cache/
+.cache/
+.npm/
+.eslintcache
+.stylelintcache
+.prettiercache
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ==============================================================================
+# 🛠️ IDE & EDITORS (VS Code, JetBrains और अन्य एडिटर्स की इंटरनल कॉन्फिग्स)
+# ==============================================================================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.patch
+
+# ==============================================================================
+# 🚀 BUILD, DIST & COMPILATION OUTPUT (बिल्ड और जनरेटेड कोड)
+# ==============================================================================
+dist/
+build/
+out/
+lib-dist/
+.next/
+.nuxt/
+.turbo/
+.docusaurus/
+tsconfig.tsbuildinfo
+
+# ==============================================================================
+# 🐳 CLOUD, DOCKER & DEPLOYMENT TRASH (Docker, AWS, serverless, Vercel Caches)
+# ==============================================================================
+.docker/
+*.tar
+*.tar.gz
+.serverless/
+.vercel
+.netlify
+.terraform/
+*.tfstate
+*.tfstate.backup
+.aws/
+.gcloud/

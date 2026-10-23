@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    
+    /* 🛠️ FIX FOR RENDER BUILD ERRORS */
+    "noUnusedLocals": false,        /* Isko false karne se unused imports build block nahi karenge */
+    "noUnusedParameters": false,    /* Isko false karne se unused req, res, next build block nahi karenge */
+    
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
