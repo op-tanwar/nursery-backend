@@ -23,10 +23,9 @@ const app = express();
 app.set("trust proxy", 1);
 
 // ======================================================================
-// 🌐 BULLETPROOF CORS CONFIGURATION & ORIGIN RESOLVER
+// 🌐 1. BULLETPROOF CORS CONFIGURATION & PREFLIGHT (VERY TOP OF PIPELINE)
 // ======================================================================
-// Trusted static origins for production, staging, and local environments
-const staticAllowedOrigins: string[] = [
+const allowedOrigins = [
   "https://urbannursery-neon.vercel.app",
   "https://urbannursery.vercel.app",
   "https://urbannursery.in",
@@ -36,65 +35,47 @@ const staticAllowedOrigins: string[] = [
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:5173",
-  "http://localhost:4173",
   "http://127.0.0.1:3000",
-  "http://127.0.0.1:3001",
   "http://127.0.0.1:5173",
 ];
 
-const allowedOriginsSet = new Set<string>(
-  staticAllowedOrigins.map((o) => normalizeOrigin(o)).filter(Boolean)
-);
-
-// Dynamically register comma-separated origins from FRONTEND_URL env var
+// Append any additional comma-separated origins from FRONTEND_URL env var
 const frontendUrl = process.env.FRONTEND_URL;
 if (frontendUrl) {
   frontendUrl.split(",").forEach((url) => {
-    const normalized = normalizeOrigin(url);
-    if (normalized) {
-      allowedOriginsSet.add(normalized);
+    const trimmed = url.trim().replace(/\/+$/, "");
+    if (trimmed && !allowedOrigins.includes(trimmed)) {
+      allowedOrigins.push(trimmed);
     }
   });
 }
 
-// Regex patterns for Vercel preview/branch deployments and local development hosts
-const allowedOriginPatterns: RegExp[] = [
-  // Vercel deployment preview domains (e.g. https://urbannursery-neon.vercel.app, https://urbannursery-git-feat.vercel.app)
-  /^https:\/\/urbannursery(-[a-zA-Z0-9_-]+)?\.vercel\.app$/,
-  // Planto preview domains (e.g. https://planto-*.vercel.app)
-  /^https:\/\/planto(-[a-zA-Z0-9_-]+)?\.vercel\.app$/,
-  // Any general urbannursery or planto vercel app deployments
-  /^https:\/\/(urbannursery|planto)-[a-zA-Z0-9_-]+\.vercel\.app$/,
-  // Localhost & 127.0.0.1 on any port for frontend developers connecting to backend
-  /^http:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?$/,
-];
-
 export const isOriginAllowed = (origin?: string): boolean => {
-  // Allow requests with no origin (e.g. mobile apps, curl, server-to-server, Postman)
   if (!origin) return true;
+  const cleanOrigin = origin.trim().replace(/\/+$/, "").toLowerCase();
 
-  const normalized = normalizeOrigin(origin);
-  if (!normalized) return false;
-
-  // 1. Direct O(1) set lookup
-  if (allowedOriginsSet.has(normalized)) {
-    return true;
-  }
-
-  // 2. Pattern match for Vercel previews and local dev ports
-  return allowedOriginPatterns.some((pattern) => pattern.test(normalized));
+  return (
+    allowedOrigins.some((o) => o.toLowerCase() === cleanOrigin) ||
+    cleanOrigin.endsWith(".vercel.app") ||
+    /^https:\/\/(urbannursery|planto)(-[a-zA-Z0-9_-]+)?\.vercel\.app$/.test(cleanOrigin) ||
+    /^http:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?$/.test(cleanOrigin)
+  );
 };
 
 const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
-    if (!origin || isOriginAllowed(origin)) {
-      return callback(null, true);
+    // Allow non-browser requests (e.g. mobile apps, curl, server-to-server)
+    if (!origin) return callback(null, true);
+
+    const isAllowed = isOriginAllowed(origin);
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS blocked for origin: ${origin}`));
     }
-    // Reject disallowed origins cleanly without throwing an unhandled server 500 error
-    return callback(null, false);
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
     "Authorization",
@@ -105,17 +86,20 @@ const corsOptions: cors.CorsOptions = {
     "Access-Control-Request-Headers",
   ],
   exposedHeaders: ["Set-Cookie", "Authorization", "Content-Disposition"],
-  optionsSuccessStatus: 204,
-  maxAge: 86400, // 24 hours preflight caching
+  optionsSuccessStatus: 200, // HTTP 200 OK for preflight responses
+  maxAge: 86400, // Cache preflight for 24 hours
 };
 
-// Mount CORS middleware at the earliest entrypoint to handle OPTIONS preflights cleanly
+// ⚡ Mount CORS at the VERY TOP before body-parser, cookie-parser, or routes
 app.use(cors(corsOptions));
 
+// ⚡ Handle preflight OPTIONS explicitly for all routes in Express 5 (/{*splat} wildcard)
+app.options("/{*splat}", cors(corsOptions));
+
 // ======================================================================
-// 🛡️ HTTP SECURITY HEADERS LAYER
+// 🛡️ 2. HTTP SECURITY HEADERS LAYER
 // ======================================================================
-// Explicitly configure crossOriginResourcePolicy to "cross-origin" to allow cross-origin API calls & assets
+// Explicitly configure crossOriginResourcePolicy to "cross-origin" so Helmet does not block cross-origin requests
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -123,7 +107,7 @@ app.use(
 );
 
 // ======================================================================
-// 🗜️ PERFORMANCE COMPRESSION LAYER
+// 🗜️ 3. PERFORMANCE COMPRESSION LAYER
 // ======================================================================
 app.use(
   compression({
@@ -136,6 +120,9 @@ app.use(
   })
 );
 
+// ======================================================================
+// 📦 4. REQUEST BODY & COOKIE PARSERS
+// ======================================================================
 app.use(
   express.json({
     limit: "10mb",
@@ -151,7 +138,7 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cookieParser());
 
 // ======================================================================
-// 🛡️ ISOLATED RATE LIMITING STRUCTURAL LAYERS
+// 🛡️ 5. ISOLATED RATE LIMITING STRUCTURAL LAYERS
 // ======================================================================
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -188,7 +175,7 @@ const newsletterLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// ✨ FIXED: Both structural user prefixes and explicit auth prefixes are now fully secured
+// Secured authentication route limits
 app.use("/api/v1/users/login", authLimiter);
 app.use("/api/v1/users/register", authLimiter);
 app.use("/api/v1/users/social-login", authLimiter);
@@ -206,7 +193,7 @@ app.use("/api/newsletter/subscribe", newsletterLimiter);
 app.use("/api/newsletter/unsubscribe", newsletterLimiter);
 
 // ======================================================================
-// 📂 FILE UPLOAD HANDLING PIPELINE WITH EXTENSION SECURITY SENSOR
+// 📂 6. FILE UPLOAD HANDLING PIPELINE WITH EXTENSION SECURITY SENSOR
 // ======================================================================
 const uploadDir = path.join(os.tmpdir(), "urban_nursery_uploads");
 if (!fs.existsSync(uploadDir)) {
@@ -247,8 +234,14 @@ const csrfGuard = (req: express.Request, res: express.Response, next: express.Ne
 };
 
 // ======================================================================
-// 🏥 SYSTEM MONITORING LABELS (HEALTH ROUTE WITH READINESS CHECK)
+// 🏥 7. SYSTEM HEALTH CHECK ROUTES
 // ======================================================================
+// Root health check endpoint (prevents 404 on base URL probes)
+app.get("/", (_req, res) => {
+  res.status(200).json({ success: true, message: "Urban Nursery API is active" });
+});
+
+// Detailed system readiness & database health check
 app.get("/health", (req, res) => {
   const dbStatus = mongoose.connection.readyState;
   const isDbHealthy = dbStatus === 1; // 1 means connected
@@ -273,7 +266,7 @@ app.get("/health", (req, res) => {
 });
 
 // ======================================================================
-// 🛣️ APPLICATION BASE ROUTES (/api/v1 and backwards-compatible /api)
+// 🛣️ 8. APPLICATION BASE ROUTES (/api/v1 and backwards-compatible /api)
 // ======================================================================
 // 🛡️ ROBOTS SHIELD: Internal API endpoints should never be indexed directly
 const apiRobotsShield = (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -284,6 +277,7 @@ const apiRobotsShield = (req: express.Request, res: express.Response, next: expr
 app.use("/api/v1", apiRobotsShield, apiLimiter, csrfGuard, validateUploadedFiles({ allowVideo: false }), mainRouter);
 app.use("/api", apiRobotsShield, apiLimiter, csrfGuard, validateUploadedFiles({ allowVideo: false }), mainRouter);
 
+// 404 Handler for unmatched routes
 app.use((req, res, next) => {
   res.status(404).json({
     success: false,
