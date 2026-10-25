@@ -52,6 +52,8 @@ const allowedOrigins = new Set<string>([
   "https://urbannursery.in",
   "https://planto-frontend-mpdo.onrender.com",
   "https://urbannursery.vercel.app",
+  "https://urbannursery-neon.vercel.app/"
+
 ]);
 if (frontendUrl) {
   frontendUrl.split(",").forEach((url) => {
