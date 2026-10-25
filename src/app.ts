@@ -23,9 +23,104 @@ const app = express();
 app.set("trust proxy", 1);
 
 // ======================================================================
+// 🌐 BULLETPROOF CORS CONFIGURATION & ORIGIN RESOLVER
+// ======================================================================
+// Trusted static origins for production, staging, and local environments
+const staticAllowedOrigins: string[] = [
+  "https://urbannursery-neon.vercel.app",
+  "https://urbannursery.vercel.app",
+  "https://urbannursery.in",
+  "https://www.urbannursery.in",
+  "https://planto-frontend-mpdo.onrender.com",
+  "https://nursery-backend-2rg3.onrender.com",
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "http://localhost:5173",
+  "http://localhost:4173",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:3001",
+  "http://127.0.0.1:5173",
+];
+
+const allowedOriginsSet = new Set<string>(
+  staticAllowedOrigins.map((o) => normalizeOrigin(o)).filter(Boolean)
+);
+
+// Dynamically register comma-separated origins from FRONTEND_URL env var
+const frontendUrl = process.env.FRONTEND_URL;
+if (frontendUrl) {
+  frontendUrl.split(",").forEach((url) => {
+    const normalized = normalizeOrigin(url);
+    if (normalized) {
+      allowedOriginsSet.add(normalized);
+    }
+  });
+}
+
+// Regex patterns for Vercel preview/branch deployments and local development hosts
+const allowedOriginPatterns: RegExp[] = [
+  // Vercel deployment preview domains (e.g. https://urbannursery-neon.vercel.app, https://urbannursery-git-feat.vercel.app)
+  /^https:\/\/urbannursery(-[a-zA-Z0-9_-]+)?\.vercel\.app$/,
+  // Planto preview domains (e.g. https://planto-*.vercel.app)
+  /^https:\/\/planto(-[a-zA-Z0-9_-]+)?\.vercel\.app$/,
+  // Any general urbannursery or planto vercel app deployments
+  /^https:\/\/(urbannursery|planto)-[a-zA-Z0-9_-]+\.vercel\.app$/,
+  // Localhost & 127.0.0.1 on any port for frontend developers connecting to backend
+  /^http:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?$/,
+];
+
+export const isOriginAllowed = (origin?: string): boolean => {
+  // Allow requests with no origin (e.g. mobile apps, curl, server-to-server, Postman)
+  if (!origin) return true;
+
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return false;
+
+  // 1. Direct O(1) set lookup
+  if (allowedOriginsSet.has(normalized)) {
+    return true;
+  }
+
+  // 2. Pattern match for Vercel previews and local dev ports
+  return allowedOriginPatterns.some((pattern) => pattern.test(normalized));
+};
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || isOriginAllowed(origin)) {
+      return callback(null, true);
+    }
+    // Reject disallowed origins cleanly without throwing an unhandled server 500 error
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+    "Access-Control-Request-Method",
+    "Access-Control-Request-Headers",
+  ],
+  exposedHeaders: ["Set-Cookie", "Authorization", "Content-Disposition"],
+  optionsSuccessStatus: 204,
+  maxAge: 86400, // 24 hours preflight caching
+};
+
+// Mount CORS middleware at the earliest entrypoint to handle OPTIONS preflights cleanly
+app.use(cors(corsOptions));
+
+// ======================================================================
 // 🛡️ HTTP SECURITY HEADERS LAYER
 // ======================================================================
-app.use(helmet());
+// Explicitly configure crossOriginResourcePolicy to "cross-origin" to allow cross-origin API calls & assets
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
 // ======================================================================
 // 🗜️ PERFORMANCE COMPRESSION LAYER
@@ -38,81 +133,6 @@ app.use(
       if (req.headers["x-no-compression"]) return false;
       return compression.filter(req, res);
     },
-  })
-);
-
-// ======================================================================
-// ⚙️ GLOBAL MIDDLEWARES (Security & Parsing Optimized)
-// ======================================================================
-const frontendUrl = process.env.FRONTEND_URL;
-const allowedOrigins = new Set<string>([
-  "http://localhost:3000",
-  "http://localhost:3001",
-  "http://127.0.0.1:3000",
-  "https://urbannursery.in",
-  "https://planto-frontend-mpdo.onrender.com",
-  "https://nursery-backend-2rg3.onrender.com/",
-  "https://urbannursery.vercel.app",
-  "https://urbannursery-neon.vercel.app/"
-
-]);
-if (frontendUrl) {
-  frontendUrl.split(",").forEach((url) => {
-    const trimmed = normalizeOrigin(url.trim());
-    if (trimmed) {
-      allowedOrigins.add(trimmed);
-    }
-  });
-}
-
-const isOriginAllowed = (origin?: string): boolean => {
-  if (!origin) return true;
-  let normalized = normalizeOrigin(origin);
-  try {
-    normalized = new URL(normalized).origin;
-  } catch {
-    // If invalid URL, keep normalized string
-  }
-
-  if (allowedOrigins.has(normalized)) {
-    return true;
-  }
-
-  // Allow localhost / 127.0.0.1 development ports strictly in non-production environments
-  if (process.env.NODE_ENV !== "production") {
-    try {
-      const parsedUrl = new URL(normalized);
-      if (
-        (parsedUrl.hostname === "localhost" || parsedUrl.hostname === "127.0.0.1") &&
-        (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:")
-      ) {
-        return true;
-      }
-    } catch {
-      return false;
-    }
-  }
-
-  return false;
-};
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
-      if (!origin) {
-        return callback(null, true);
-      }
-      if (isOriginAllowed(origin)) {
-        return callback(null, true);
-      }
-      // Reject disallowed origins cleanly so CORS blocks them
-      return callback(null, false);
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
-    optionsSuccessStatus: 204,
   })
 );
 
@@ -243,7 +263,6 @@ app.get("/health", (req, res) => {
     });
   }
 
-  // ✨ FIXED: Added 'return' here to satisfy TypeScript's strict code-path routing check
   return res.status(200).json({
     success: true,
     status: "UP",
