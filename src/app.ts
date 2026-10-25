@@ -51,6 +51,7 @@ const allowedOrigins = new Set<string>([
   "http://127.0.0.1:3000",
   "https://urbannursery.in",
   "https://planto-frontend-mpdo.onrender.com",
+  "https://nursery-backend-2rg3.onrender.com/",
   "https://urbannursery.vercel.app",
   "https://urbannursery-neon.vercel.app/"
 
