@@ -24,6 +24,11 @@ const baseProductSchema = z.object({
   stock: z.coerce.number().min(0, "Stock cannot be negative").default(1),
   metaTitle: z.string().trim().optional(),
   metaDescription: z.string().trim().optional(),
+  existingImages: z.any().optional(),
+  existingGalleryImages: z.any().optional(),
+  retainedImages: z.any().optional(),
+  images: z.any().optional(),
+  galleryImages: z.any().optional(),
 });
 
 // 1. Plant Schema
@@ -164,6 +169,9 @@ export const validateProductBody = (schema: z.ZodTypeAny, payloadKey?: string) =
 
     // Attach validated data
     req.body = { ...req.body, ...result.data };
+    if (body.existingImages !== undefined) req.body.existingImages = body.existingImages;
+    if (body.existingGalleryImages !== undefined) req.body.existingGalleryImages = body.existingGalleryImages;
+    if (body.retainedImages !== undefined) req.body.retainedImages = body.retainedImages;
     next();
   };
 };

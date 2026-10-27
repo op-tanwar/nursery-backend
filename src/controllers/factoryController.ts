@@ -6,6 +6,7 @@ import ErrorHandler from "../utils/errorHandler";
 import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import ApiFeatures from "../utils/apiFeatures";
 import cloudinary from "cloudinary";
+import fs from "node:fs";
 import NurseryProfile from "../models/nurseryProfileModel";
 import { getPluralKey, getSingularKey, getTotalCountKey } from "../utils/productRegistry";
 import cacheManager from "../utils/cacheManager";
@@ -28,16 +29,54 @@ const getCachedActiveNurseryIds = async (): Promise<string[]> => {
   );
 };
 
+// Helper to normalize express-fileupload single/array input
+const normalizeFiles = (files: any): UploadedFile[] => {
+  if (!files) return [];
+  return Array.isArray(files) ? files : [files];
+};
+
 // Helper structure for Cloudinary Media Asset management
 const uploadToCloudinary = async (file: UploadedFile, folder: string) => {
-  return cloudinary.v2.uploader.upload(file.tempFilePath, {
-    folder,
-    transformation: [
-      { width: 800, height: 800, crop: "limit" },
-      { quality: "auto" },
-      { fetch_format: "auto" }
-    ]
-  });
+  try {
+    if (file.tempFilePath && fs.existsSync(file.tempFilePath)) {
+      return await cloudinary.v2.uploader.upload(file.tempFilePath, {
+        folder,
+        transformation: [
+          { width: 800, height: 800, crop: "limit" },
+          { quality: "auto" },
+          { fetch_format: "auto" }
+        ]
+      });
+    } else if (file.data) {
+      return await new Promise<cloudinary.UploadApiResponse>((resolve, reject) => {
+        const stream = cloudinary.v2.uploader.upload_stream(
+          {
+            folder,
+            transformation: [
+              { width: 800, height: 800, crop: "limit" },
+              { quality: "auto" },
+              { fetch_format: "auto" }
+            ]
+          },
+          (error, result) => {
+            if (error || !result) return reject(error || new Error("Cloudinary upload failed"));
+            resolve(result);
+          }
+        );
+        stream.end(file.data);
+      });
+    } else {
+      throw new Error("Uploaded file has no temporary path or binary buffer");
+    }
+  } finally {
+    if (file.tempFilePath && fs.existsSync(file.tempFilePath)) {
+      try {
+        fs.unlinkSync(file.tempFilePath);
+      } catch (err) {
+        console.error(`[uploadToCloudinary] Failed to unlink temp file ${file.tempFilePath}:`, err);
+      }
+    }
+  }
 };
 
 // 🌟 1. CREATE RESOURCE
@@ -65,31 +104,48 @@ export const createResource = (ResourceModel: Model<any>, folderName: string, pa
     let finalCoverImage = parsedBody.coverImage;
     let finalImages = parsedBody.images || [];
 
-    if (req.files && req.files.coverImage) {
-      const coverImageFile = Array.isArray(req.files.coverImage)
-        ? (req.files.coverImage[0] as UploadedFile)
-        : (req.files.coverImage as UploadedFile);
+    const incomingCoverFiles = [
+      ...normalizeFiles(req.files?.coverImage),
+      ...normalizeFiles(req.files?.["coverImage"]),
+      ...normalizeFiles(req.files?.["coverImage[]"]),
+    ];
 
-      const galleryFiles: UploadedFile[] = req.files.images
-        ? Array.isArray(req.files.images)
-          ? (req.files.images as UploadedFile[])
-          : [req.files.images as UploadedFile]
-        : [];
+    const incomingGalleryFiles: UploadedFile[] = [
+      ...normalizeFiles(req.files?.galleryImages),
+      ...normalizeFiles(req.files?.images),
+      ...normalizeFiles(req.files?.["galleryImages[]"]),
+      ...normalizeFiles(req.files?.["images[]"]),
+    ];
 
-      const [uploadedCover, ...uploadedGallery] = await Promise.all([
-        uploadToCloudinary(coverImageFile, `${folderName}/cover`),
-        ...galleryFiles.map((file) => uploadToCloudinary(file, `${folderName}/gallery`)),
-      ]);
+    const uploadTasks: Promise<any>[] = [];
+    let coverTaskIndex = -1;
 
-      finalCoverImage = {
-        public_id: uploadedCover.public_id,
-        url: uploadedCover.secure_url,
-      };
+    if (incomingCoverFiles.length > 0) {
+      coverTaskIndex = uploadTasks.length;
+      uploadTasks.push(uploadToCloudinary(incomingCoverFiles[0], `${folderName}/cover`));
+    }
 
-      finalImages = uploadedGallery.map((img) => ({
-        public_id: img.public_id,
-        url: img.secure_url,
-      }));
+    const galleryStartIndex = uploadTasks.length;
+    incomingGalleryFiles.forEach((file) => {
+      uploadTasks.push(uploadToCloudinary(file, `${folderName}/gallery`));
+    });
+
+    if (uploadTasks.length > 0) {
+      const results = await Promise.all(uploadTasks);
+
+      if (coverTaskIndex >= 0) {
+        finalCoverImage = {
+          public_id: results[coverTaskIndex].public_id,
+          url: results[coverTaskIndex].secure_url || results[coverTaskIndex].url,
+        };
+      }
+
+      if (incomingGalleryFiles.length > 0) {
+        finalImages = results.slice(galleryStartIndex).map((img) => ({
+          public_id: img.public_id,
+          url: img.secure_url || img.url,
+        }));
+      }
     }
 
     if (!finalCoverImage || !finalCoverImage.url) {
@@ -447,17 +503,24 @@ export const updateResource = (
     let coverImageData;
     let galleryImagesData: any[] = [];
 
-    if (req.files && req.files.coverImage) {
-      const coverImageFile = Array.isArray(req.files.coverImage)
-        ? (req.files.coverImage[0] as UploadedFile)
-        : (req.files.coverImage as UploadedFile);
+    const incomingCoverFiles = [
+      ...normalizeFiles(req.files?.coverImage),
+      ...normalizeFiles(req.files?.["coverImage"]),
+      ...normalizeFiles(req.files?.["coverImage[]"]),
+    ];
+
+    if (incomingCoverFiles.length > 0) {
+      const coverImageFile = incomingCoverFiles[0];
 
       if (resource.coverImage?.public_id) {
         await cloudinary.v2.uploader.destroy(resource.coverImage.public_id).catch(() => null);
       }
 
       const uploadedCover = await uploadToCloudinary(coverImageFile, `${folderName}/cover`);
-      coverImageData = { public_id: uploadedCover.public_id, url: uploadedCover.secure_url };
+      coverImageData = {
+        public_id: uploadedCover.public_id,
+        url: uploadedCover.secure_url || uploadedCover.url,
+      };
     }
 
     // Support flat FormData fields AND JSON payload blobs (same as create)
@@ -489,43 +552,116 @@ export const updateResource = (
       }
     }
 
-    if (req.files && req.files.images) {
-      const galleryFiles = Array.isArray(req.files.images)
-        ? (req.files.images as UploadedFile[])
-        : [req.files.images as UploadedFile];
+    // Safely collect incoming new gallery files via express-fileupload
+    const incomingGalleryFiles: UploadedFile[] = [
+      ...normalizeFiles(req.files?.galleryImages),
+      ...normalizeFiles(req.files?.images),
+      ...normalizeFiles(req.files?.["galleryImages[]"]),
+      ...normalizeFiles(req.files?.["images[]"]),
+    ];
 
+    if (incomingGalleryFiles.length > 0) {
       const uploadedGallery = await Promise.all(
-        galleryFiles.map((file) => uploadToCloudinary(file, `${folderName}/gallery`))
+        incomingGalleryFiles.map((file) => uploadToCloudinary(file, `${folderName}/gallery`))
       );
 
       galleryImagesData = uploadedGallery.map((img) => ({
         public_id: img.public_id,
-        url: img.secure_url,
+        url: img.secure_url || img.url,
       }));
     }
 
     // Handle existing images retained/removed
-    let baseImages = resource.images || [];
+    let baseImages: Array<{ public_id: string; url: string }> = Array.isArray(resource.images)
+      ? [...resource.images]
+      : [];
     let hasExplicitGalleryUpdate = false;
-    if (parsedBody.existingImages !== undefined) {
+
+    // Check all possible keys where existing gallery images might be passed
+    const rawExisting =
+      parsedBody.existingImages ??
+      parsedBody.existingGalleryImages ??
+      parsedBody.retainedImages ??
+      parsedBody.preservedImages ??
+      req.body?.existingImages ??
+      req.body?.existingGalleryImages ??
+      req.body?.retainedImages;
+
+    if (rawExisting !== undefined) {
       hasExplicitGalleryUpdate = true;
-      let existingImgArray = parsedBody.existingImages;
+      let existingImgArray = rawExisting;
+
       if (typeof existingImgArray === "string") {
         try {
           existingImgArray = JSON.parse(existingImgArray);
         } catch {
-          existingImgArray = [];
+          existingImgArray = existingImgArray
+            .split(",")
+            .map((s: string) => s.trim())
+            .filter(Boolean);
         }
       }
+
       if (Array.isArray(existingImgArray)) {
-        baseImages = existingImgArray;
-        // Clean up removed images from Cloudinary
-        const retainedIds = new Set(existingImgArray.map((img: any) => img.public_id).filter(Boolean));
-        (resource.images || []).forEach((oldImg: any) => {
-          if (oldImg.public_id && !retainedIds.has(oldImg.public_id)) {
-            cloudinary.v2.uploader.destroy(oldImg.public_id).catch(() => null);
+        const currentResourceImages: Array<{ public_id: string; url: string }> = Array.isArray(resource.images)
+          ? resource.images
+          : [];
+
+        const retainedImages: Array<{ public_id: string; url: string }> = [];
+
+        existingImgArray.forEach((item: any, idx: number) => {
+          if (!item) return;
+
+          if (typeof item === "string") {
+            const matched = currentResourceImages.find(
+              (img) => img.url === item || img.public_id === item
+            );
+            if (matched) {
+              retainedImages.push({ public_id: matched.public_id, url: matched.url });
+            } else {
+              retainedImages.push({
+                public_id: `existing_${Date.now()}_${idx}`,
+                url: item,
+              });
+            }
+          } else if (typeof item === "object") {
+            const itemUrl = item.url || item.secure_url || item.src;
+            const itemPublicId = item.public_id || item.publicId;
+
+            const matched = currentResourceImages.find(
+              (img) =>
+                (itemPublicId && img.public_id === itemPublicId) ||
+                (itemUrl && img.url === itemUrl)
+            );
+
+            if (matched) {
+              retainedImages.push({ public_id: matched.public_id, url: matched.url });
+            } else if (itemUrl) {
+              retainedImages.push({
+                public_id: itemPublicId || `existing_${Date.now()}_${idx}`,
+                url: itemUrl,
+              });
+            }
           }
         });
+
+        // Clean up removed / discarded images from Cloudinary
+        const retainedIds = new Set(retainedImages.map((img) => img.public_id).filter(Boolean));
+        const retainedUrls = new Set(retainedImages.map((img) => img.url).filter(Boolean));
+
+        for (const oldImg of currentResourceImages) {
+          const isRetained =
+            (oldImg.public_id && retainedIds.has(oldImg.public_id)) ||
+            (oldImg.url && retainedUrls.has(oldImg.url));
+
+          if (!isRetained && oldImg.public_id) {
+            cloudinary.v2.uploader.destroy(oldImg.public_id).catch((err) => {
+              console.error(`[Cloudinary] Failed to delete discarded asset ${oldImg.public_id}:`, err);
+            });
+          }
+        }
+
+        baseImages = retainedImages;
       }
     }
 
