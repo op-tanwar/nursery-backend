@@ -31,9 +31,9 @@ export interface IPlant extends Document {
   careInstructions: string[];
   price: number;
   discountPrice?: number;
-  lightRequirement: "Direct Sunlight" | "Indirect Light" | "Low Light";
-  wateringSchedule: "Everyday" | "Alternate Days" | "Once a Week" | "When Dry";
-  maintenanceLevel?: "Easy" | "Moderate" | "High";
+  lightRequirement: string;
+  wateringSchedule: string;
+  maintenanceLevel?: string;
   isPetFriendly?: boolean;
   category: string;
   ratings: number;

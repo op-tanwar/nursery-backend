@@ -39,8 +39,8 @@ export interface IPot extends Document {
   price: number;
   discountPrice?: number;
   hasDrainageHole?: boolean;
-  shape: "Round" | "Square" | "Rectangular" | "Hexagonal" | "Oval" | "Custom";
-  isIndoorOutdoor?: "Indoor Only" | "Outdoor Only" | "Both";
+  shape: string;
+  isIndoorOutdoor?: string;
   includesSaucer?: boolean;
   category: string;        // e.g., "Indoor Pots", "Hanging Pots"
   ratings: number;

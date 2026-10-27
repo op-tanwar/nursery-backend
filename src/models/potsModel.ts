@@ -76,13 +76,14 @@ const potSchema: Schema<IPot> = new Schema(
     },
     shape: {
       type: String,
-      enum: ["Round", "Square", "Rectangular", "Hexagonal", "Oval", "Custom"],
       required: true,
+      default: "Round",
+      trim: true,
     },
     isIndoorOutdoor: {
       type: String,
-      enum: ["Indoor Only", "Outdoor Only", "Both"],
       default: "Both",
+      trim: true,
     },
     includesSaucer: {
       type: Boolean,

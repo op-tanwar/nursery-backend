@@ -2,16 +2,66 @@ import { z } from "zod";
 import { Request, Response, NextFunction } from "express";
 import ErrorHandler from "../utils/errorHandler";
 
+// Helper to safely parse strings or arrays from FormData
+const stringToArray = z.preprocess((val) => {
+  if (Array.isArray(val)) {
+    return val.map((s) => (typeof s === "string" ? s.trim() : s)).filter(Boolean);
+  }
+  if (typeof val === "string") {
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) {
+        return parsed.map((s) => (typeof s === "string" ? s.trim() : s)).filter(Boolean);
+      }
+    } catch {
+      return val
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}, z.array(z.string().trim()).min(1, "At least one entry is required"));
+
+// Helper for optional string to array
+const optionalStringToArray = z.preprocess((val) => {
+  if (!val) return [];
+  if (Array.isArray(val)) {
+    return val.map((s) => (typeof s === "string" ? s.trim() : s)).filter(Boolean);
+  }
+  if (typeof val === "string") {
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) {
+        return parsed.map((s) => (typeof s === "string" ? s.trim() : s)).filter(Boolean);
+      }
+    } catch {
+      return val
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}, z.array(z.string().trim()).optional());
+
 // Common Description Option Schema
-export const descriptionOptionSchema = z.object({
-  short: z.string().trim().min(1, "Please enter short description"),
-  points: z
-    .array(z.string().trim())
-    .min(1, "At least one highlight point is required")
-    .refine((items) => items.some((item) => item.length > 0), {
-      message: "At least one non-empty highlight point is required",
-    }),
-});
+export const descriptionOptionSchema = z.preprocess(
+  (val) => {
+    if (typeof val === "string") {
+      try {
+        return JSON.parse(val);
+      } catch {
+        return val;
+      }
+    }
+    return val;
+  },
+  z.object({
+    short: z.string().trim().min(1, "Please enter short description"),
+    points: stringToArray,
+  })
+);
 
 // Base Product Schema with Standardized Fields
 const baseProductSchema = z.object({
@@ -31,85 +81,178 @@ const baseProductSchema = z.object({
   galleryImages: z.any().optional(),
 });
 
-// 1. Plant Schema
+// ─────────────────────────────────────────────────────────────
+// 1. Plant Schema: Broaden Light, Watering & Maintenance
+// ─────────────────────────────────────────────────────────────
 export const plantValidationSchema = baseProductSchema.extend({
-  benefits: z.array(z.string().trim()).min(1, "At least one plant benefit is required"),
-  careInstructions: z.array(z.string().trim()).min(1, "At least one care instruction is required"),
-  lightRequirement: z.enum(["Direct Sunlight", "Indirect Light", "Low Light"]),
-  wateringSchedule: z.enum(["Everyday", "Alternate Days", "Once a Week", "When Dry"]),
-  maintenanceLevel: z.enum(["Easy", "Moderate", "High"]).optional().default("Easy"),
-  isPetFriendly: z.coerce.boolean().optional().default(true),
+  benefits: stringToArray,
+  careInstructions: stringToArray,
+  lightRequirement: z.preprocess(
+    (val) => String(val || "").trim(),
+    z.string().min(1, "Light requirement is required")
+  ),
+  wateringSchedule: z.preprocess(
+    (val) => String(val || "").trim(),
+    z.string().min(1, "Watering schedule is required")
+  ),
+  maintenanceLevel: z.preprocess(
+    (val) => String(val || "Easy").trim(),
+    z.string().optional().default("Easy")
+  ),
+  isPetFriendly: z.preprocess((val) => val === "true" || val === true, z.boolean().default(true)),
 });
 
-// 2. Pot Schema
+// ─────────────────────────────────────────────────────────────
+// 2. Pot Schema: Material, Dimensions, Shape, Placement
+// ─────────────────────────────────────────────────────────────
 export const potValidationSchema = baseProductSchema.extend({
   material: z.string().trim().min(1, "Pot material is required"),
-  color: z.array(z.string().trim()).min(1, "At least one color is required"),
-  dimensions: z.object({
-    height: z.string().trim().min(1, "Pot height is required"),
-    diameter: z.string().trim().min(1, "Pot diameter is required"),
-  }),
-  hasDrainageHole: z.coerce.boolean().optional().default(true),
-  shape: z.enum(["Round", "Square", "Rectangular", "Hexagonal", "Oval", "Custom"]),
-  isIndoorOutdoor: z.enum(["Indoor Only", "Outdoor Only", "Both"]).optional().default("Both"),
-  includesSaucer: z.coerce.boolean().optional().default(false),
+  color: stringToArray,
+  dimensions: z.preprocess(
+    (val) => {
+      if (typeof val === "string") {
+        try {
+          return JSON.parse(val);
+        } catch {
+          return val;
+        }
+      }
+      return val;
+    },
+    z.object({
+      height: z.string().trim().min(1, "Pot height is required"),
+      diameter: z.string().trim().min(1, "Pot diameter is required"),
+      width: z.string().trim().optional(),
+      length: z.string().trim().optional(),
+    })
+  ),
+  hasDrainageHole: z.preprocess((val) => val === "true" || val === true, z.boolean().default(true)),
+  shape: z.preprocess(
+    (val) => String(val || "Round").trim(),
+    z.string().min(1, "Shape is required")
+  ),
+  isIndoorOutdoor: z.preprocess(
+    (val) => String(val || "Both").trim(),
+    z.string().default("Both")
+  ),
+  includesSaucer: z.preprocess((val) => val === "true" || val === true, z.boolean().default(false)),
 });
 
-// 3. Accessory Schema
+// ─────────────────────────────────────────────────────────────
+// 3. Accessory Schema: Flexible Specifications
+// ─────────────────────────────────────────────────────────────
 export const accessoryValidationSchema = baseProductSchema.extend({
-  specifications: z.object({
-    brand: z.string().trim().optional(),
-    weight: z.string().trim().optional(),
-    material: z.string().trim().optional(),
-    capacity: z.string().trim().optional(),
-    dimensions: z.string().trim().optional(),
-  }).optional(),
+  specifications: z.preprocess(
+    (val) => {
+      if (typeof val === "string") {
+        try {
+          return JSON.parse(val);
+        } catch {
+          return {};
+        }
+      }
+      return val || {};
+    },
+    z
+      .object({
+        brand: z.string().trim().optional(),
+        weight: z.string().trim().optional(),
+        material: z.string().trim().optional(),
+        capacity: z.string().trim().optional(),
+        dimensions: z.string().trim().optional(),
+      })
+      .optional()
+      .default({})
+  ),
 });
 
+// ─────────────────────────────────────────────────────────────
 // 4. Artificial / Dried Plant Schema
+// ─────────────────────────────────────────────────────────────
 export const artificialDriedPlantValidationSchema = baseProductSchema.extend({
-  specifications: z.object({
-    brand: z.string().trim().optional(),
-    material: z.string().trim().optional(),
-    height: z.string().trim().optional(),
-    color: z.string().trim().optional(),
-    washable: z.coerce.boolean().optional(),
-    potIncluded: z.coerce.boolean().optional(),
-  }).optional(),
+  specifications: z.preprocess(
+    (val) => {
+      if (typeof val === "string") {
+        try {
+          return JSON.parse(val);
+        } catch {
+          return {};
+        }
+      }
+      return val || {};
+    },
+    z
+      .object({
+        brand: z.string().trim().optional(),
+        material: z.string().trim().optional(),
+        height: z.string().trim().optional(),
+        color: z.string().trim().optional(),
+        washable: z.preprocess((v) => v === "true" || v === true, z.boolean().optional()),
+        potIncluded: z.preprocess((v) => v === "true" || v === true, z.boolean().optional()),
+      })
+      .optional()
+      .default({})
+  ),
 });
 
+// ─────────────────────────────────────────────────────────────
 // 5. Gardening Tool Schema
+// ─────────────────────────────────────────────────────────────
 export const gardeningToolValidationSchema = baseProductSchema.extend({
-  features: z.array(z.string().trim()).min(1, "At least one feature is required"),
+  features: stringToArray,
   material: z.string().trim().optional(),
   handleMaterial: z.string().trim().optional(),
-  warrantyMonths: z.coerce.number().optional(),
+  warrantyMonths: z.preprocess((val) => (val ? Number(val) : 0), z.number().optional().default(0)),
 });
 
-// 6. Plant Care Schema
+// ─────────────────────────────────────────────────────────────
+// 6. Plant Care & Fertilizers Schema
+// ─────────────────────────────────────────────────────────────
 export const plantCareValidationSchema = baseProductSchema.extend({
-  howToUse: z.array(z.string().trim()).min(1, "At least one usage instruction is required"),
+  howToUse: stringToArray,
   composition: z.string().trim().optional(),
   volumeOrWeight: z.string().trim().optional(),
   formType: z.string().trim().optional(),
-  isOrganic: z.coerce.boolean().optional(),
+  isOrganic: z.preprocess((val) => val === "true" || val === true, z.boolean().default(true)),
 });
 
+// ─────────────────────────────────────────────────────────────
 // 7. Plant Stands & Shelves Schema
+// ─────────────────────────────────────────────────────────────
 export const plantStandsShelvesValidationSchema = baseProductSchema.extend({
   material: z.string().trim().min(1, "Material is required"),
-  dimensions: z.object({
-    height: z.string().trim().optional(),
-    width: z.string().trim().optional(),
-    length: z.string().trim().optional(),
-  }).optional(),
-  tierCount: z.coerce.number().min(1).optional().default(1),
-  maxLoadCapacity: z.string().trim().optional(),
+  dimensions: z.preprocess(
+    (val) => {
+      if (typeof val === "string") {
+        try {
+          return JSON.parse(val);
+        } catch {
+          return {};
+        }
+      }
+      return val || {};
+    },
+    z
+      .object({
+        height: z.string().trim().optional(),
+        width: z.string().trim().optional(),
+        length: z.string().trim().optional(),
+      })
+      .optional()
+      .default({})
+  ),
+  tierCount: z.preprocess((val) => (val ? Number(val) : 1), z.number().min(1).default(1)),
+  maxLoadCapacity: z.preprocess(
+    (val) => (val !== undefined && val !== null ? String(val).trim() : undefined),
+    z.string().trim().optional()
+  ),
 });
 
+// ─────────────────────────────────────────────────────────────
 // 8. Seeds & Bulbs Schema
+// ─────────────────────────────────────────────────────────────
 export const seedsBulbsValidationSchema = baseProductSchema.extend({
-  sowingSeason: z.array(z.string().trim()).min(1, "At least one sowing season is required"),
+  sowingSeason: stringToArray,
   germinationTime: z.string().trim().optional(),
   quantityPerPack: z.string().trim().min(1, "Pack quantity is required"),
 });
@@ -128,8 +271,22 @@ export const validateProductBody = (schema: z.ZodTypeAny, payloadKey?: string) =
     }
 
     // Try parsing nested JSON string fields if passed in FormData
-    ["descriptionOption", "dimensions", "specifications", "color", "benefits", "careInstructions", "features", "howToUse", "sowingSeason"].forEach((field) => {
-      if (body[field] && typeof body[field] === "string" && (body[field].startsWith("{") || body[field].startsWith("["))) {
+    [
+      "descriptionOption",
+      "dimensions",
+      "specifications",
+      "color",
+      "benefits",
+      "careInstructions",
+      "features",
+      "howToUse",
+      "sowingSeason",
+    ].forEach((field) => {
+      if (
+        body[field] &&
+        typeof body[field] === "string" &&
+        (body[field].startsWith("{") || body[field].startsWith("["))
+      ) {
         try {
           body[field] = JSON.parse(body[field]);
         } catch {
@@ -139,9 +296,10 @@ export const validateProductBody = (schema: z.ZodTypeAny, payloadKey?: string) =
     });
 
     const isUpdate = req.method === "PUT" || req.method === "PATCH";
-    const baseSchema = isUpdate && typeof (schema as any).partial === "function"
-      ? (schema as any).partial()
-      : schema;
+    const baseSchema =
+      isUpdate && typeof (schema as any).partial === "function"
+        ? (schema as any).partial()
+        : schema;
 
     const validationSchema = baseSchema.superRefine((data: any, ctx: z.RefinementCtx) => {
       if (
@@ -163,7 +321,9 @@ export const validateProductBody = (schema: z.ZodTypeAny, payloadKey?: string) =
 
     const result = validationSchema.safeParse(body);
     if (!result.success) {
-      const errorDetails = (result.error.issues || []).map((e: any) => `${e.path.join(".")}: ${e.message}`).join("; ");
+      const errorDetails = (result.error.issues || [])
+        .map((e: any) => `${e.path.join(".")}: ${e.message}`)
+        .join("; ");
       return next(new ErrorHandler(`Validation Failed: ${errorDetails}`, 400));
     }
 

@@ -61,18 +61,18 @@ const plantSchema: Schema<IPlant> = new Schema(
     },
     lightRequirement: {
       type: String,
-      enum: ["Direct Sunlight", "Indirect Light", "Low Light"],
-      required: true,
+      required: [true, "Please enter light requirement"],
+      trim: true,
     },
     wateringSchedule: {
       type: String,
-      enum: ["Everyday", "Alternate Days", "Once a Week", "When Dry"],
-      required: true,
+      required: [true, "Please enter watering schedule"],
+      trim: true,
     },
     maintenanceLevel: {
       type: String,
-      enum: ["Easy", "Moderate", "High"],
       default: "Easy",
+      trim: true,
     },
     isPetFriendly: {
       type: Boolean,
