@@ -77,6 +77,8 @@ const baseProductSchema = z.object({
   existingImages: z.any().optional(),
   existingGalleryImages: z.any().optional(),
   retainedImages: z.any().optional(),
+  deletedImagePublicIds: z.any().optional(),
+  deletedPublicIds: z.any().optional(),
   images: z.any().optional(),
   galleryImages: z.any().optional(),
 });
@@ -332,6 +334,8 @@ export const validateProductBody = (schema: z.ZodTypeAny, payloadKey?: string) =
     if (body.existingImages !== undefined) req.body.existingImages = body.existingImages;
     if (body.existingGalleryImages !== undefined) req.body.existingGalleryImages = body.existingGalleryImages;
     if (body.retainedImages !== undefined) req.body.retainedImages = body.retainedImages;
+    if (body.deletedImagePublicIds !== undefined) req.body.deletedImagePublicIds = body.deletedImagePublicIds;
+    if (body.deletedPublicIds !== undefined) req.body.deletedPublicIds = body.deletedPublicIds;
     next();
   };
 };

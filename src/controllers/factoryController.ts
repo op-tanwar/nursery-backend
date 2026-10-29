@@ -447,11 +447,18 @@ export const getResourceDetails = (ResourceModel: Model<any>) =>
     }
 
     // ⚡ HTTP caching: CDN caches 10 min, browser 5 min, stale-while-revalidate for instant repeat loads
-    if (!req.user) {
+    const isCacheBusted = Boolean(req.query.t || req.query._ || req.headers["cache-control"]?.includes("no-cache"));
+    const isVendorOrAuth = Boolean(req.user || req.headers.authorization || (req as any).cookies?.token);
+
+    if (!isVendorOrAuth && !isCacheBusted) {
       res.setHeader(
         "Cache-Control",
         "public, max-age=300, s-maxage=600, stale-while-revalidate=59"
       );
+    } else {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
     }
 
     const vSlug =
@@ -553,12 +560,20 @@ export const updateResource = (
     }
 
     // Safely collect incoming new gallery files via express-fileupload
-    const incomingGalleryFiles: UploadedFile[] = [
-      ...normalizeFiles(req.files?.galleryImages),
-      ...normalizeFiles(req.files?.images),
-      ...normalizeFiles(req.files?.["galleryImages[]"]),
-      ...normalizeFiles(req.files?.["images[]"]),
-    ];
+    // Deduplicate between galleryImages and images to avoid duplicate uploads
+    let rawGalleryList: any[] = [];
+    if (req.files?.galleryImages || req.files?.["galleryImages[]"]) {
+      rawGalleryList = [
+        ...normalizeFiles(req.files?.galleryImages),
+        ...normalizeFiles(req.files?.["galleryImages[]"]),
+      ];
+    } else if (req.files?.images || req.files?.["images[]"]) {
+      rawGalleryList = [
+        ...normalizeFiles(req.files?.images),
+        ...normalizeFiles(req.files?.["images[]"]),
+      ];
+    }
+    const incomingGalleryFiles: UploadedFile[] = rawGalleryList.filter(Boolean);
 
     if (incomingGalleryFiles.length > 0) {
       const uploadedGallery = await Promise.all(
@@ -571,11 +586,59 @@ export const updateResource = (
       }));
     }
 
+    // Process explicit deleted image public IDs
+    const rawDeletedIds =
+      parsedBody.deletedImagePublicIds ??
+      parsedBody.deletedPublicIds ??
+      req.body?.deletedImagePublicIds ??
+      req.body?.deletedPublicIds;
+
+    let deletedPublicIds: string[] = [];
+    if (rawDeletedIds !== undefined && rawDeletedIds !== null) {
+      if (typeof rawDeletedIds === "string") {
+        try {
+          const parsed = JSON.parse(rawDeletedIds);
+          if (Array.isArray(parsed)) {
+            deletedPublicIds = parsed.map(String).filter(Boolean);
+          } else {
+            deletedPublicIds = [String(parsed)].filter(Boolean);
+          }
+        } catch {
+          deletedPublicIds = rawDeletedIds
+            .split(",")
+            .map((s: string) => s.trim())
+            .filter(Boolean);
+        }
+      } else if (Array.isArray(rawDeletedIds)) {
+        deletedPublicIds = rawDeletedIds.map(String).filter(Boolean);
+      }
+    }
+
+    // Explicitly destroy deleted assets in Cloudinary
+    if (deletedPublicIds.length > 0) {
+      await Promise.all(
+        deletedPublicIds.map((pid) =>
+          cloudinary.v2.uploader.destroy(pid).catch((err) => {
+            console.error(`[Cloudinary] Failed to delete explicit asset ${pid}:`, err);
+          })
+        )
+      );
+    }
+
     // Handle existing images retained/removed
-    let baseImages: Array<{ public_id: string; url: string }> = Array.isArray(resource.images)
-      ? [...resource.images]
+    const currentResourceImages: Array<{ public_id: string; url: string }> = Array.isArray(resource.images)
+      ? resource.images
       : [];
+
+    let baseImages: Array<{ public_id: string; url: string }> = [...currentResourceImages];
     let hasExplicitGalleryUpdate = false;
+
+    // Filter out explicitly deleted IDs
+    if (deletedPublicIds.length > 0) {
+      hasExplicitGalleryUpdate = true;
+      const deletedSet = new Set(deletedPublicIds);
+      baseImages = baseImages.filter((img) => !img.public_id || !deletedSet.has(img.public_id));
+    }
 
     // Check all possible keys where existing gallery images might be passed
     const rawExisting =
@@ -603,10 +666,6 @@ export const updateResource = (
       }
 
       if (Array.isArray(existingImgArray)) {
-        const currentResourceImages: Array<{ public_id: string; url: string }> = Array.isArray(resource.images)
-          ? resource.images
-          : [];
-
         const retainedImages: Array<{ public_id: string; url: string }> = [];
 
         existingImgArray.forEach((item: any, idx: number) => {
@@ -645,23 +704,29 @@ export const updateResource = (
           }
         });
 
+        // Filter out any image that was deleted
+        const deletedSet = new Set(deletedPublicIds);
+        const filteredRetained = retainedImages.filter(
+          (img) => !img.public_id || !deletedSet.has(img.public_id)
+        );
+
         // Clean up removed / discarded images from Cloudinary
-        const retainedIds = new Set(retainedImages.map((img) => img.public_id).filter(Boolean));
-        const retainedUrls = new Set(retainedImages.map((img) => img.url).filter(Boolean));
+        const retainedIds = new Set(filteredRetained.map((img) => img.public_id).filter(Boolean));
+        const retainedUrls = new Set(filteredRetained.map((img) => img.url).filter(Boolean));
 
         for (const oldImg of currentResourceImages) {
           const isRetained =
             (oldImg.public_id && retainedIds.has(oldImg.public_id)) ||
             (oldImg.url && retainedUrls.has(oldImg.url));
 
-          if (!isRetained && oldImg.public_id) {
+          if (!isRetained && oldImg.public_id && !deletedSet.has(oldImg.public_id)) {
             cloudinary.v2.uploader.destroy(oldImg.public_id).catch((err) => {
               console.error(`[Cloudinary] Failed to delete discarded asset ${oldImg.public_id}:`, err);
             });
           }
         }
 
-        baseImages = retainedImages;
+        baseImages = filteredRetained;
       }
     }
 
@@ -688,16 +753,17 @@ export const updateResource = (
       }
     });
 
-    const updateData: any = {
-      ...whitelistedFields,
-      ...(coverImageData && { coverImage: coverImageData }),
-      ...((hasExplicitGalleryUpdate || galleryImagesData.length > 0) && { images: finalGalleryImages }),
-    };
+    Object.assign(resource, whitelistedFields);
+    if (coverImageData) {
+      resource.coverImage = coverImageData;
+      resource.markModified("coverImage");
+    }
+    if (hasExplicitGalleryUpdate || galleryImagesData.length > 0 || deletedPublicIds.length > 0) {
+      resource.images = finalGalleryImages;
+      resource.markModified("images");
+    }
 
-    const updatedResource = await ResourceModel.findByIdAndUpdate(req.params.id, updateData, {
-      new: true,
-      runValidators: true,
-    });
+    const updatedResource = await resource.save();
 
     cacheManager.invalidatePattern(`catalog:${ResourceModel.modelName}:`);
 
