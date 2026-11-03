@@ -25,9 +25,9 @@ const router = express.Router();
 router.route("/new").post(isAuthenticatedUser, createNewOrder);
 router.route("/").post(isAuthenticatedUser, createNewOrder);
 router.route("/me").get(isAuthenticatedUser, myOrders);
-router.route("/single/:id").get(optionalAuthenticateUser, getSingleOrder);
-router.route("/detail/:id").get(optionalAuthenticateUser, getSingleOrder);
-router.route("/:id").get(optionalAuthenticateUser, getSingleOrder);
+router.route("/single/:id").get(isAuthenticatedUser, getSingleOrder);
+router.route("/detail/:id").get(isAuthenticatedUser, getSingleOrder);
+router.route("/:id").get(isAuthenticatedUser, getSingleOrder);
 router.route("/nursery/single/:id").get(isAuthenticatedUser, authorizeRoles("nursery"), getSingleOrder);
 router.route("/admin/single/:id").get(isAuthenticatedUser, authorizeRoles("admin"), getSingleOrder);
 

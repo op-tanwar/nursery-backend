@@ -471,42 +471,30 @@ export const createNewOrder = catchAsyncErrors(
 );
 
 // ======================================================================
-// 🔍 2. GET SINGLE ORDER
+// 🔍 2. GET SINGLE ORDER (SECURED WITH STRICT IDOR / BOLA GUARDS)
 // ======================================================================
 export const getSingleOrder = catchAsyncErrors(
   async (req: Request, res: Response, next: NextFunction) => {
+    // 1. Authentication Guard: Must be an authenticated user
+    if (!req.user) {
+      return next(new ErrorHandler("Please login to access this order", 401));
+    }
+
     const rawId = req.params.id;
     const id = String(Array.isArray(rawId) ? rawId[0] : rawId || "").trim();
 
-    if (process.env.NODE_ENV !== "production") {
-      console.log(`[OrderController] GET single order request received. ID: "${id}"`);
+    // 2. ID Validation First: Must be a valid 24-character hexadecimal MongoDB ObjectId
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return next(
+        new ErrorHandler(
+          "Invalid order ID format. Must be a valid 24-character ObjectId.",
+          400
+        )
+      );
     }
 
-    if (!id) {
-      return next(new ErrorHandler("Order ID parameter is required.", 400));
-    }
-
-    // 1. Prioritize MongoDB _id lookup first, with orderId and paymentInfo fallbacks
-    const isValidObjectId = mongoose.Types.ObjectId.isValid(id);
-    const orderQuery = isValidObjectId
-      ? {
-          $or: [
-            { _id: id },
-            { orderId: id },
-            { "paymentInfo.orderId": id },
-            { "paymentInfo.id": id },
-          ],
-        }
-      : {
-          $or: [
-            { orderId: id },
-            { "paymentInfo.orderId": id },
-            { "paymentInfo.id": id },
-          ],
-        };
-
-    // 2. Fetch order with populated relational schemas defensively
-    const order = await Order.findOne(orderQuery)
+    // 3. Fetch Order by ID with populated relational schemas
+    const order = await Order.findById(id)
       .populate("user", "name email phone role avatar")
       .populate("orderItems.item")
       .populate({
@@ -516,41 +504,65 @@ export const getSingleOrder = catchAsyncErrors(
       });
 
     if (!order) {
-      console.warn(`[OrderController] Order not found for ID: "${id}"`);
       return next(new ErrorHandler(`Order not found with ID: ${id}`, 404));
     }
 
-    const currentUserId = req.user?._id?.toString();
-    const isAdmin = req.user?.role === "admin";
-    const isOwner =
-      order.user &&
-      ((typeof order.user === "object" && (order.user as any)._id?.toString() === currentUserId) ||
-        order.user.toString() === currentUserId);
+    const currentUserId = req.user._id.toString();
+    const isAdmin = req.user.role === "admin";
+
+    // Customer / Owner check
+    const rawOrderUser: any = order.user;
+    const orderUserId = rawOrderUser
+      ? (rawOrderUser._id ? rawOrderUser._id.toString() : rawOrderUser.toString())
+      : null;
+    const isOwner = Boolean(orderUserId && orderUserId === currentUserId);
+
+    // Resolve nursery profile ID if caller is a nursery vendor
+    let userNurseryProfileId: string | null = null;
+    if (req.user.role === "nursery") {
+      const nurseryDoc = await NurseryProfile.findOne({ nursery: req.user._id })
+        .select("_id")
+        .lean();
+      if (nurseryDoc?._id) {
+        userNurseryProfileId = nurseryDoc._id.toString();
+      }
+    }
+
+    const reqNurseryId = (req.user as any).nurseryId
+      ? String((req.user as any).nurseryId)
+      : null;
+
+    // Associated Nursery check: Does order contain any items from this nursery?
     const isAssociatedNursery =
       Array.isArray(order.orderItems) &&
       order.orderItems.some((item: any) => {
         const itemNurseryId =
-          typeof item.nursery === "object"
-            ? item.nursery?._id?.toString()
+          typeof item.nursery === "object" && item.nursery !== null
+            ? item.nursery._id?.toString()
             : item.nursery?.toString();
-        return itemNurseryId === currentUserId;
+        return (
+          itemNurseryId === currentUserId ||
+          (userNurseryProfileId && itemNurseryId === userNurseryProfileId) ||
+          (reqNurseryId && itemNurseryId === reqNurseryId)
+        );
       });
 
-    // 3. Allow logged-in owner, admin, or associated nursery.
-    // Also do NOT block public/guest lookup if the user opened an order confirmation link with a valid 24-char order ID.
-    if (req.user && !isAdmin && !isOwner && !isAssociatedNursery && !isValidObjectId) {
-      console.warn(`[OrderController] Access denied for user "${currentUserId}" on order "${id}"`);
-      return next(new ErrorHandler("You are not authorized to view this order", 403));
+    // 4. Strict Authorization Matrix:
+    // Only Admin, Order Owner (Customer), or an Associated Nursery may access the order
+    if (!isAdmin && !isOwner && !isAssociatedNursery) {
+      return next(
+        new ErrorHandler("You are not authorized to view this order", 403)
+      );
     }
 
-    // 4. Enrich order with nursery profile and product aliases for frontend compatibility
+    // 5. Convert to plain object & enrich nursery details
     const orderObj: any = order.toObject ? order.toObject() : order;
     const nurseryUserIds: string[] = Array.from(
       new Set(
         (orderObj.orderItems || [])
           .map((item: any) =>
-            typeof item.nursery === "object"
-              ? item.nursery?._id?.toString()
+            typeof item.nursery === "object" && item.nursery !== null
+              ? item.nursery._id?.toString()
               : item.nursery?.toString()
           )
           .filter(Boolean)
@@ -575,8 +587,8 @@ export const getSingleOrder = catchAsyncErrors(
 
     orderObj.orderItems = (orderObj.orderItems || []).map((oi: any) => {
       const nId =
-        typeof oi.nursery === "object"
-          ? oi.nursery?._id?.toString()
+        typeof oi.nursery === "object" && oi.nursery !== null
+          ? oi.nursery._id?.toString()
           : oi.nursery?.toString();
       const nProfile = profileMap.get(nId);
       const productDoc = oi.item || oi.product || {};
@@ -602,21 +614,42 @@ export const getSingleOrder = catchAsyncErrors(
       };
     });
 
-    if (process.env.NODE_ENV !== "production") {
-      console.log(
-        `[OrderController] Order "${id}" successfully retrieved. Status: "${orderObj.orderStatus}"`
-      );
-    }
-
+    // 6. Associated Nursery Data Filtering (Data Isolation)
+    // If accessed by an associated nursery (and not admin or owner),
+    // strictly isolate items so they can ONLY view their own items and earnings.
     if (isAssociatedNursery && !isAdmin && !isOwner) {
       orderObj.orderItems = (orderObj.orderItems || []).filter((item: any) => {
         const itemNurseryId =
-          typeof item.nursery === "object"
-            ? item.nursery?._id?.toString()
+          typeof item.nursery === "object" && item.nursery !== null
+            ? item.nursery._id?.toString()
             : item.nursery?.toString();
-        return itemNurseryId === currentUserId;
+        return (
+          itemNurseryId === currentUserId ||
+          (userNurseryProfileId && itemNurseryId === userNurseryProfileId) ||
+          (reqNurseryId && itemNurseryId === reqNurseryId)
+        );
       });
-      return res.status(200).json({ success: true, order: orderObj });
+
+      // Recalculate totals specifically for this nursery's items
+      const nurseryItemsPrice = orderObj.orderItems.reduce(
+        (sum: number, it: any) =>
+          sum + (Number(it.price || it.priceAtPurchase || 0) * Number(it.quantity || 1)),
+        0
+      );
+      const nurseryTaxPrice = orderObj.orderItems.reduce(
+        (sum: number, it: any) => sum + Number(it.taxAmount || 0),
+        0
+      );
+
+      orderObj.itemsPrice = nurseryItemsPrice;
+      orderObj.taxPrice = nurseryTaxPrice;
+      orderObj.totalPrice = nurseryItemsPrice + nurseryTaxPrice;
+    }
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log(
+        `[OrderController] Order "${id}" successfully retrieved by user "${currentUserId}" (${req.user.role}). Status: "${orderObj.orderStatus}"`
+      );
     }
 
     res.status(200).json({ success: true, order: orderObj });
