@@ -109,6 +109,7 @@ const plantCareSchema: Schema<IPlantCare> = new Schema(
         rating: { type: Number, required: true },
         comment: { type: String, required: true },
         user: { type: Schema.Types.ObjectId, ref: "User" },
+        isVerifiedBuyer: { type: Boolean, default: true },
         createdAt: { type: Date, default: Date.now },
       },
     ],

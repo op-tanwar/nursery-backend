@@ -133,6 +133,10 @@ const accessorySchema: Schema<IAccessory> = new Schema(
           type: Schema.Types.ObjectId,
           ref: "User",
         },
+        isVerifiedBuyer: {
+          type: Boolean,
+          default: true,
+        },
         createdAt: {
           type: Date,
           default: Date.now,

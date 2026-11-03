@@ -6,6 +6,7 @@ export interface IReview {
   rating: number;
   comment: string;
   user?: Types.ObjectId;
+  isVerifiedBuyer?: boolean;
   createdAt: Date;
 }
 

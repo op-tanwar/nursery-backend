@@ -8,6 +8,7 @@ import ApiFeatures from "../utils/apiFeatures";
 import cloudinary from "cloudinary";
 import fs from "node:fs";
 import NurseryProfile from "../models/nurseryProfileModel";
+import Order from "../models/orderModel";
 import { getPluralKey, getSingularKey, getTotalCountKey } from "../utils/productRegistry";
 import cacheManager from "../utils/cacheManager";
 
@@ -843,55 +844,108 @@ export const createResourceReview = (ResourceModel: Model<any>, idKey: string) =
     if (!req.user) return next(new ErrorHandler("Unauthorized", 401));
 
     const { rating, comment } = req.body;
-    const targetId = req.body[idKey] || req.body.itemId || req.body.id || req.query[idKey];
+    const targetId =
+      req.body[idKey] ||
+      req.body.itemId ||
+      req.body.productId ||
+      req.body.resourceId ||
+      req.body.id ||
+      req.params.id ||
+      req.query[idKey] ||
+      req.query.itemId ||
+      req.query.productId ||
+      req.query.id;
 
     if (!targetId) {
       return next(new ErrorHandler(`Target resource ID mapping missing. Expected key: ${idKey}`, 400));
     }
 
-    // 🛡️ FIXED: Enforced numeric boundaries explicitly inside core logic arrays
-    const parsedRating = Number(rating);
-    if (isNaN(parsedRating) || parsedRating < 1 || parsedRating > 5) {
-      return next(new ErrorHandler("Validation Fault: Product evaluation score bounds must explicitly range between 1 and 5.", 400));
+    if (!mongoose.Types.ObjectId.isValid(targetId.toString())) {
+      return next(new ErrorHandler("Invalid resource ID format", 400));
     }
 
-    const resource = await ResourceModel.findById(targetId);
+    const productObjectId = new mongoose.Types.ObjectId(targetId.toString());
+
+    // 🛡️ Enforced numeric boundaries explicitly (1 to 5)
+    const parsedRating = Number(rating);
+    if (isNaN(parsedRating) || parsedRating < 1 || parsedRating > 5) {
+      return next(
+        new ErrorHandler("Validation Fault: Product evaluation score bounds must explicitly range between 1 and 5.", 400)
+      );
+    }
+
+    const resource = await ResourceModel.findById(productObjectId);
     if (!resource) return next(new ErrorHandler(`${ResourceModel.modelName} cluster node not found`, 404));
 
+    // Prevent vendor from reviewing their own listing
     if (resource.nursery && resource.nursery.toString() === req.user._id.toString()) {
       return next(new ErrorHandler(`You cannot review your own listing`, 403));
     }
 
+    // 🛡️ 1. PURCHASE VERIFICATION: Strict "Verified Buyer" check
+    // Ensure the user has an existing order containing the target product with Delivered status
+    const hasDeliveredOrder = await Order.exists({
+      user: req.user._id,
+      $or: [
+        {
+          orderStatus: "Delivered",
+          orderItems: {
+            $elemMatch: {
+              item: productObjectId,
+              status: { $nin: ["Cancelled"] },
+            },
+          },
+        },
+        {
+          orderItems: {
+            $elemMatch: {
+              item: productObjectId,
+              status: "Delivered",
+            },
+          },
+        },
+      ],
+    });
+
+    if (!hasDeliveredOrder) {
+      return res.status(403).json({
+        success: false,
+        status: "fail",
+        message: "Only verified buyers who have received this product can leave a review.",
+      });
+    }
+
     if (!resource.reviews) resource.reviews = [];
 
+    // 🛡️ 2. PREVENT DUPLICATE REVIEWS
     const existingReview = resource.reviews.find(
       (rev: any) => rev.user && rev.user.toString() === req.user!._id.toString()
     );
 
     if (existingReview) {
-      existingReview.rating = parsedRating;
-      existingReview.comment = comment;
-      if (req.body.author || req.user.name) {
-        existingReview.name = req.body.author || req.user.name;
-      }
-    } else {
-      resource.reviews.push({
-        user: req.user._id,
-        name: req.body.author || req.user.name || "Anonymous Buyer",
-        rating: parsedRating,
-        comment,
-        createdAt: new Date(),
-      });
+      return next(new ErrorHandler("You have already reviewed this product.", 400));
     }
 
+    // 🛡️ 3. SAVE REVIEW WITH isVerifiedBuyer: true
+    resource.reviews.push({
+      user: req.user._id,
+      name: req.body.author || req.user.name || "Anonymous Buyer",
+      rating: parsedRating,
+      comment: typeof comment === "string" ? comment.trim() : "",
+      isVerifiedBuyer: true,
+      createdAt: new Date(),
+    });
+
     resource.numOfReviews = resource.reviews.length;
-    resource.ratings = resource.reviews.reduce((acc: number, item: any) => acc + item.rating, 0) / resource.reviews.length;
+    resource.ratings =
+      resource.reviews.reduce((acc: number, item: any) => acc + item.rating, 0) / resource.reviews.length;
 
     await resource.save({ validateBeforeSave: false });
 
-    res.status(200).json({
+    return res.status(201).json({
       success: true,
-      message: "Review matrix synced successfully!"
+      status: "success",
+      message: "Review submitted successfully!",
     });
   });
 
