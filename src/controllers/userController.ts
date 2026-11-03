@@ -1,4 +1,4 @@
-﻿import { Request, Response, NextFunction } from "express";
+import { Request, Response, NextFunction } from "express";
 import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import ErrorHandler from "../utils/errorHandler";
 import User from "../models/userModel";
@@ -12,6 +12,8 @@ import {
   getAdminNewUserAlertHtml,
   sendPasswordChangedAlert,
   sendForgotPasswordEmail,
+  sendEmailChangeOtpEmail,
+  sendEmailChangedSuccessNotification,
 } from "../templates/emails";
 import * as crypto from "crypto";
 import cloudinary from "cloudinary";
@@ -343,23 +345,32 @@ export const updatePassword = catchAsyncErrors(
 );
 
 // ======================================================================
-// UPDATE PROFILE
+// UPDATE PROFILE (WITH VERIFIED EMAIL CHANGE WORKFLOW)
 // ======================================================================
 export const updateProfile = catchAsyncErrors(
   async (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) return next(new ErrorHandler("Unauthorized", 401));
 
-    const newUserData: any = {
-      name: req.body.name,
-      email: req.body.email?.toLowerCase(),
-    };
-
     const userId = (req.user as any)._id;
+    const user = await User.findById(userId).select("+emailVerificationOTP");
+    if (!user) {
+      return next(new ErrorHandler("User account not found", 404));
+    }
 
+    // 1. Update Safe Profile Fields (Name)
+    if (req.body.name && typeof req.body.name === "string") {
+      const cleanName = req.body.name.trim();
+      if (cleanName.length < 2 || cleanName.length > 50) {
+        return next(
+          new ErrorHandler("Name must be between 2 and 50 characters", 400)
+        );
+      }
+      user.name = cleanName;
+    }
+
+    // 2. Update Avatar if provided
     if (req.body.avatar && req.body.avatar !== "") {
-      const user = await User.findById(userId);
-
-      if (user?.avatar?.public_id && user.avatar.public_id !== "avatars/default_id") {
+      if (user.avatar?.public_id && user.avatar.public_id !== "avatars/default_id") {
         await cloudinary.v2.uploader.destroy(user.avatar.public_id);
       }
 
@@ -369,21 +380,243 @@ export const updateProfile = catchAsyncErrors(
         crop: "scale",
       });
 
-      newUserData.avatar = {
+      user.avatar = {
         public_id: myCloud.public_id,
         url: myCloud.secure_url,
       };
     }
 
-    const user = await User.findByIdAndUpdate(userId, newUserData, {
-      new: true,
-      runValidators: true,
+    // 3. Email Change Handling (Requires Verification)
+    let requiresEmailVerification = false;
+    let pendingEmailAddress: string | null = null;
+
+    if (req.body.email && typeof req.body.email === "string") {
+      const cleanEmail = req.body.email.trim().toLowerCase();
+
+      // Only initiate verification if the new email differs from the current active email
+      if (cleanEmail !== user.email.toLowerCase()) {
+        if (!validator.isEmail(cleanEmail)) {
+          return next(new ErrorHandler("Please provide a valid email address.", 400));
+        }
+
+        // Check if the new email is already claimed by another user account
+        const emailConflict = await User.findOne({
+          email: cleanEmail,
+          _id: { $ne: user._id },
+        });
+
+        if (emailConflict) {
+          return next(
+            new ErrorHandler("This email address is already in use by another account.", 400)
+          );
+        }
+
+        // Generate cryptographically secure 6-digit numeric OTP
+        const otp = crypto.randomInt(100000, 1000000).toString();
+        const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes TTL
+
+        user.pendingEmail = cleanEmail;
+        user.emailVerificationOTP = hashedOtp;
+        user.emailVerificationExpires = expiresAt;
+
+        requiresEmailVerification = true;
+        pendingEmailAddress = cleanEmail;
+
+        // Dispatch verification email to the NEW email address asynchronously
+        sendEmailChangeOtpEmail(cleanEmail, user.name, otp, 15).catch((err) => {
+          console.error("❌ [Email Dispatch Failed] Email Change OTP:", err?.message || err);
+        });
+      }
+    }
+
+    await user.save();
+
+    const userObj = user.toObject ? user.toObject() : user;
+    delete (userObj as any).password;
+    delete (userObj as any).dashboardPassword;
+    delete (userObj as any).emailVerificationOTP;
+
+    if (requiresEmailVerification) {
+      return res.status(200).json({
+        success: true,
+        requiresEmailVerification: true,
+        pendingEmail: pendingEmailAddress,
+        message: `Profile updated. A 6-digit verification code has been sent to ${pendingEmailAddress}. Please verify to complete your email change.`,
+        user: userObj,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      requiresEmailVerification: false,
+      message: "Profile updated successfully.",
+      user: userObj,
+    });
+  }
+);
+
+// ======================================================================
+// VERIFY EMAIL CHANGE (PROTECTED)
+// ======================================================================
+export const verifyEmailChange = catchAsyncErrors(
+  async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new ErrorHandler("Unauthorized", 401));
+
+    const { otp } = req.body;
+    if (!otp || typeof otp !== "string" || !otp.trim()) {
+      return next(new ErrorHandler("Please provide the 6-digit verification code.", 400));
+    }
+
+    const cleanOtp = otp.trim();
+    if (!/^\d{6}$/.test(cleanOtp)) {
+      return next(new ErrorHandler("Verification code must be exactly 6 digits.", 400));
+    }
+
+    const user = await User.findById(req.user._id).select(
+      "+emailVerificationOTP +pendingEmail +emailVerificationExpires"
+    );
+
+    if (!user) {
+      return next(new ErrorHandler("User not found.", 404));
+    }
+
+    if (!user.pendingEmail) {
+      return next(
+        new ErrorHandler("No pending email change request found for this account.", 400)
+      );
+    }
+
+    if (!user.emailVerificationOTP || !user.emailVerificationExpires) {
+      return next(
+        new ErrorHandler("Verification code is missing or has expired. Please request a new one.", 400)
+      );
+    }
+
+    if (new Date() > user.emailVerificationExpires) {
+      return next(
+        new ErrorHandler("Verification code has expired. Please request a new code.", 400)
+      );
+    }
+
+    // Cryptographic constant-time comparison
+    const hashedInputOtp = crypto.createHash("sha256").update(cleanOtp).digest("hex");
+    const bufferExpected = Buffer.from(user.emailVerificationOTP, "utf-8");
+    const bufferReceived = Buffer.from(hashedInputOtp, "utf-8");
+
+    if (
+      bufferExpected.length !== bufferReceived.length ||
+      !crypto.timingSafeEqual(bufferExpected, bufferReceived)
+    ) {
+      return next(new ErrorHandler("Invalid verification code. Please check and try again.", 400));
+    }
+
+    // Re-verify that the pending email was not registered by someone else during the window
+    const emailConflict = await User.findOne({
+      email: user.pendingEmail,
+      _id: { $ne: user._id },
+    });
+
+    if (emailConflict) {
+      user.pendingEmail = undefined;
+      user.emailVerificationOTP = undefined;
+      user.emailVerificationExpires = undefined;
+      await user.save();
+      return next(
+        new ErrorHandler("This email address was recently registered by another account.", 409)
+      );
+    }
+
+    const oldEmail = user.email;
+    const newEmail = user.pendingEmail;
+
+    // Apply the verified email
+    user.email = newEmail;
+    user.pendingEmail = undefined;
+    user.emailVerificationOTP = undefined;
+    user.emailVerificationExpires = undefined;
+
+    await user.save();
+
+    // Send security notification to both old and new addresses
+    sendEmailChangedSuccessNotification(oldEmail, newEmail, user.name).catch((err) => {
+      console.error("❌ [Email Trigger Failed] Email change alert:", err?.message || err);
+    });
+
+    const userObj = user.toObject ? user.toObject() : user;
+    delete (userObj as any).password;
+    delete (userObj as any).dashboardPassword;
+    delete (userObj as any).emailVerificationOTP;
+
+    res.status(200).json({
+      success: true,
+      message: "Email address verified and updated successfully.",
+      user: userObj,
+    });
+  }
+);
+
+// ======================================================================
+// RESEND EMAIL CHANGE OTP (PROTECTED, RATE-LIMITED COOLDOWN)
+// ======================================================================
+export const resendEmailChangeOtp = catchAsyncErrors(
+  async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new ErrorHandler("Unauthorized", 401));
+
+    const user = await User.findById(req.user._id).select(
+      "+emailVerificationOTP +pendingEmail +emailVerificationExpires"
+    );
+
+    if (!user || !user.pendingEmail) {
+      return next(
+        new ErrorHandler("No pending email change request found for this account.", 400)
+      );
+    }
+
+    // Rate-limiting cooldown: enforce 60 seconds between OTP requests
+    if (user.emailVerificationExpires) {
+      const msRemaining = user.emailVerificationExpires.getTime() - Date.now();
+      const msElapsed = 15 * 60 * 1000 - msRemaining;
+      if (msElapsed < 60 * 1000 && msElapsed >= 0) {
+        const secondsToWait = Math.ceil((60 * 1000 - msElapsed) / 1000);
+        return next(
+          new ErrorHandler(
+            `Please wait ${secondsToWait} second(s) before requesting another verification code.`,
+            429
+          )
+        );
+      }
+    }
+
+    // Re-verify that pending email is not already taken
+    const emailConflict = await User.findOne({
+      email: user.pendingEmail,
+      _id: { $ne: user._id },
+    });
+
+    if (emailConflict) {
+      return next(
+        new ErrorHandler("This email address is already in use by another account.", 409)
+      );
+    }
+
+    // Generate fresh OTP with 15-minute expiration
+    const otp = crypto.randomInt(100000, 1000000).toString();
+    const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    user.emailVerificationOTP = hashedOtp;
+    user.emailVerificationExpires = expiresAt;
+    await user.save();
+
+    sendEmailChangeOtpEmail(user.pendingEmail, user.name, otp, 15).catch((err) => {
+      console.error("❌ [Email Dispatch Failed] Resend Email Change OTP:", err?.message || err);
     });
 
     res.status(200).json({
       success: true,
-      message: "Profile updated successfully",
-      user,
+      message: `A new 6-digit verification code has been dispatched to ${user.pendingEmail}.`,
+      expiresInMinutes: 15,
     });
   }
 );

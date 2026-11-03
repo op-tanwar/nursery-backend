@@ -1606,6 +1606,101 @@ export const sendForgotPasswordEmail = async (
   });
 };
 
+/**
+ * Dispatch Email Change OTP Verification Email
+ */
+export const sendEmailChangeOtpEmail = async (
+  recipientEmail: string,
+  userName: string,
+  otp: string,
+  validMinutes: number = 15
+) => {
+  const bodyHtml = `
+    <div style="text-align: center; margin-bottom: 24px;">
+      <h2 style="color: #0f172a; margin-top: 0; font-size: 22px; font-weight: 700;">Verify Your New Email Address</h2>
+      <p style="color: #475569; font-size: 15px; line-height: 1.6;">
+        Hi <strong>${userName}</strong>, you recently requested to update your email address on ${BRAND_NAME}.
+      </p>
+    </div>
+    <div style="background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 12px; padding: 20px; text-align: center; margin: 24px 0;">
+      <p style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 8px 0; font-weight: 600;">Verification Code (OTP)</p>
+      <div style="font-size: 36px; font-weight: 800; letter-spacing: 6px; color: ${BRAND_COLOR}; font-family: monospace;">${otp}</div>
+      <p style="color: #94a3b8; font-size: 12px; margin: 8px 0 0 0;">Valid for ${validMinutes} minutes</p>
+    </div>
+    <p style="color: #64748b; font-size: 13px; line-height: 1.5; text-align: center; margin-top: 24px;">
+      If you did not initiate this change, please ignore this email. Your current account email address remains unchanged until verified.
+    </p>
+  `;
+
+  return sendEmail({
+    email: recipientEmail,
+    subject: `🔐 Your ${BRAND_NAME} Email Verification Code: ${otp}`,
+    message: `Hi ${userName}, your email verification code is: ${otp} (valid for ${validMinutes} minutes).`,
+    html: baseEmailWrapper({
+      title: "Verify Your New Email Address",
+      preheader: `Your verification code is ${otp}`,
+      bodyHtml,
+      recipientEmail,
+    }),
+  });
+};
+
+/**
+ * Dispatch Email Changed Success Security Alerts (to both old and new addresses)
+ */
+export const sendEmailChangedSuccessNotification = async (
+  oldEmail: string,
+  newEmail: string,
+  userName: string
+) => {
+  const oldBodyHtml = `
+    <div style="margin-bottom: 20px;">
+      <h2 style="color: #0f172a; margin-top: 0; font-size: 20px; font-weight: 700;">Security Alert: Email Address Changed</h2>
+      <p style="color: #475569; font-size: 15px; line-height: 1.6;">
+        Hi <strong>${userName}</strong>, your account email on ${BRAND_NAME} has been changed to <strong>${newEmail}</strong>.
+      </p>
+      <p style="color: #dc2626; font-size: 13px; line-height: 1.5; background: #fef2f2; border: 1px solid #fee2e2; padding: 12px; border-radius: 8px; margin-top: 16px;">
+        ⚠️ If you did not make this change, please contact support immediately to safeguard your account.
+      </p>
+    </div>
+  `;
+
+  const newBodyHtml = `
+    <div style="margin-bottom: 20px;">
+      <h2 style="color: #0f172a; margin-top: 0; font-size: 20px; font-weight: 700;">Email Address Successfully Updated</h2>
+      <p style="color: #475569; font-size: 15px; line-height: 1.6;">
+        Hi <strong>${userName}</strong>, this email address is now verified and active as your primary login email on ${BRAND_NAME}.
+      </p>
+    </div>
+  `;
+
+  const sendOld = sendEmail({
+    email: oldEmail,
+    subject: `🔒 Security Alert: Your ${BRAND_NAME} Email Was Changed`,
+    message: `Hi ${userName}, your account email on ${BRAND_NAME} was changed to ${newEmail}. If this wasn't you, contact support immediately.`,
+    html: baseEmailWrapper({
+      title: "Security Alert: Email Address Changed",
+      preheader: "Your account email address has been modified",
+      bodyHtml: oldBodyHtml,
+      recipientEmail: oldEmail,
+    }),
+  }).catch((err) => console.error("Failed to notify old email of change:", err?.message));
+
+  const sendNew = sendEmail({
+    email: newEmail,
+    subject: `✅ Email Successfully Updated on ${BRAND_NAME}`,
+    message: `Hi ${userName}, this email is now linked to your ${BRAND_NAME} account.`,
+    html: baseEmailWrapper({
+      title: "Email Address Linked",
+      preheader: "Your new primary email is verified",
+      bodyHtml: newBodyHtml,
+      recipientEmail: newEmail,
+    }),
+  }).catch((err) => console.error("Failed to notify new email of change:", err?.message));
+
+  return Promise.allSettled([sendOld, sendNew]);
+};
+
 
 // ======================================================================
 // 📦 BULK ORDERS & B2B INQUIRY TEMPLATES & DISPATCHERS

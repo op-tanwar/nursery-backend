@@ -61,6 +61,7 @@ mainRouter.use("/artificial-dried-plants", artificialDriedPlantRoutes);
 
 // 👤 Customer & identity system routes (Auth/Profile)
 mainRouter.use("/users", userRoutes);
+mainRouter.use("/user", userRoutes);
 
 // 🛒 Orders, multi-vendor splits & tracking routes
 mainRouter.use("/orders", orderRouter);

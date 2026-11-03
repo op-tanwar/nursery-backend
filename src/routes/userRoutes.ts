@@ -12,6 +12,8 @@ import {
   getUserDetails,
   updatePassword,
   updateProfile,
+  verifyEmailChange,
+  resendEmailChangeOtp,
   getAllUsers,
   getSingleUser,
   updateUserRole,
@@ -82,6 +84,9 @@ router.post("/test-email", async (req: any, res: any) => {
 router.get("/me", isAuthenticatedUser, getUserDetails);
 router.put("/password/update", isAuthenticatedUser, updatePassword);
 router.put("/me/update", isAuthenticatedUser, updateProfile);
+router.put("/update", isAuthenticatedUser, updateProfile);
+router.post("/verify-email-change", isAuthenticatedUser, verifyEmailChange);
+router.post("/resend-email-otp", isAuthenticatedUser, resendEmailChangeOtp);
 
 // ------------------------
 // Admin User Management

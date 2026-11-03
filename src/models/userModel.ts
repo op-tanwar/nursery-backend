@@ -79,6 +79,16 @@ const userSchema = new Schema<IUser>(
     },
     resetPasswordToken: String,
     resetPasswordExpire: Date,
+    pendingEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+    },
+    emailVerificationOTP: {
+      type: String,
+      select: false,
+    },
+    emailVerificationExpires: Date,
   },
   { timestamps: true }
 );

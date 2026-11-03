@@ -23,6 +23,9 @@ export interface IUser extends Document {
   authProvider?: "local" | "google" | "email";
   resetPasswordToken?: string;
   resetPasswordExpire?: Date;
+  pendingEmail?: string;
+  emailVerificationOTP?: string;
+  emailVerificationExpires?: Date;
   createdAt: Date;
   isActive: boolean;
   isBlocked: boolean;
