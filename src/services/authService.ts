@@ -107,6 +107,18 @@ export async function verifyGoogleToken(token: string): Promise<GoogleUserProfil
 }
 
 /**
+ * Allowed roles that can be self-assigned during public social registration.
+ *
+ * SECURITY NOTE:
+ * "admin" accounts CANNOT be provisioned via public OAuth or self-registration.
+ * Super-admin accounts must only be provisioned via internal seed scripts,
+ * direct database migrations, or an authenticated super-admin dashboard by an
+ * existing administrator.
+ */
+export type AllowedPublicRole = "user" | "nursery";
+const ALLOWED_PUBLIC_ROLES: readonly AllowedPublicRole[] = ["user", "nursery"] as const;
+
+/**
  * 2. Find or Create / Merge Google Social Account
  */
 export async function authenticateSocialUser(
@@ -116,6 +128,25 @@ export async function authenticateSocialUser(
 ): Promise<IUser> {
   if (provider !== "google") {
     throw new ErrorHandler("Only Google authentication is currently supported", 400);
+  }
+
+  // 🛡️ ROLE VALIDATION & PRIVILEGE ESCALATION GUARD
+  let resolvedRole: AllowedPublicRole = "user";
+  if (preferredRole) {
+    const cleanRole = String(preferredRole).trim().toLowerCase();
+    if (cleanRole === "admin") {
+      throw new ErrorHandler(
+        "Access Denied: Administrator accounts cannot be self-provisioned via social authentication.",
+        400
+      );
+    }
+    if (!ALLOWED_PUBLIC_ROLES.includes(cleanRole as AllowedPublicRole)) {
+      throw new ErrorHandler(
+        `Invalid registration role "${preferredRole}". Allowed roles are: ${ALLOWED_PUBLIC_ROLES.join(", ")}.`,
+        400
+      );
+    }
+    resolvedRole = cleanRole as AllowedPublicRole;
   }
 
   const profile = await verifyGoogleToken(token);
@@ -138,6 +169,8 @@ export async function authenticateSocialUser(
       throw new ErrorHandler("Your account is currently suspended. Please contact support.", 403);
     }
 
+    // 🔒 SECURITY GUARD: Existing user's role MUST be preserved.
+    // NEVER overwrite or mutate user.role with preferredRole from client payload.
     let modified = false;
 
     // Link googleId to existing account if not yet attached
@@ -164,17 +197,13 @@ export async function authenticateSocialUser(
       await user.save({ validateBeforeSave: false });
     }
   } else {
-    // Create brand new user via Google OAuth
-    const validRole = preferredRole && ["user", "nursery", "admin"].includes(preferredRole)
-      ? (preferredRole as "user" | "nursery" | "admin")
-      : "user";
-
+    // Create brand new user via Google OAuth with strictly validated public role
     user = await User.create({
       name: profile.name,
       email: profile.email,
       authProvider: "google",
       googleId: profile.providerId,
-      role: validRole,
+      role: resolvedRole,
       avatar: profile.picture
         ? {
             public_id: `google_avatar_${profile.providerId}`,
