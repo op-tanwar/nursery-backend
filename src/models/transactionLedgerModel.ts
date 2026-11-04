@@ -27,7 +27,9 @@ export type LedgerEntryType =
   | "PAYOUT_COMPLETED"
   | "PAYOUT_REJECTED"
   | "FALLBACK_REFUND"
-  | "STOCK_COLLISION_REFUND";
+  | "STOCK_COLLISION_REFUND"
+  | "CUSTOMER_REFUND"
+  | "RETURN_REFUND";
 
 export interface ITransactionLedger extends Document {
   /** The nursery this entry belongs to (optional for platform/customer fallback refunds) */
@@ -60,6 +62,10 @@ export interface ITransactionLedger extends Document {
     refundId?: string;
     reason?: string;
     customerEmail?: string;
+    claimId?: string;
+    refundAmountRupees?: number;
+    paymentId?: string;
+    replacementOrderId?: string;
   };
 
   /** Running balance AFTER this entry was applied (denormalized for fast reads) */
@@ -86,6 +92,8 @@ const transactionLedgerSchema = new Schema<ITransactionLedger>(
         "PAYOUT_REJECTED",
         "FALLBACK_REFUND",
         "STOCK_COLLISION_REFUND",
+        "CUSTOMER_REFUND",
+        "RETURN_REFUND",
       ],
       required: true,
     },
@@ -131,6 +139,10 @@ const transactionLedgerSchema = new Schema<ITransactionLedger>(
       refundId: { type: String },
       reason: { type: String },
       customerEmail: { type: String },
+      claimId: { type: String },
+      refundAmountRupees: { type: Number },
+      paymentId: { type: String },
+      replacementOrderId: { type: String },
     },
 
     runningBalance: {

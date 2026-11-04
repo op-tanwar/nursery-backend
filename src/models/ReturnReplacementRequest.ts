@@ -72,6 +72,41 @@ const returnReplacementRequestSchema = new Schema<IReturnReplacementRequest>(
     resolvedAt: {
       type: Date,
     },
+    isProcessed: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    refundDetails: {
+      refundId: { type: String, trim: true },
+      refundStatus: {
+        type: String,
+        enum: ["PENDING", "PROCESSED", "FAILED", "PENDING_MANUAL_REVIEW"],
+      },
+      refundAmount: { type: Number, default: 0 },
+      refundedAt: { type: Date },
+      failureReason: { type: String, trim: true },
+    },
+    replacementOrderId: {
+      type: Schema.Types.ObjectId,
+      ref: "Order",
+      index: true,
+    },
+    inventoryAction: {
+      type: String,
+      enum: ["RESTOCKED", "DEFECTIVE_RECORDED", "REPLACEMENT_DISPATCHED", "NONE"],
+      default: "NONE",
+    },
+    timeline: [
+      {
+        status: { type: String, required: true },
+        action: { type: String, required: true },
+        actor: { type: Schema.Types.ObjectId, ref: "User" },
+        actorRole: { type: String, default: "admin" },
+        notes: { type: String, default: "" },
+        timestamp: { type: Date, default: Date.now },
+      },
+    ],
   },
   {
     timestamps: true,
