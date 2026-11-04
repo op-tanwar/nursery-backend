@@ -8,6 +8,7 @@ import {
   deleteBlog
 } from "../controllers/blogController";
 import { isAuthenticatedUser, authorizeRoles } from "../middleware/auth";
+import { validateUploadedFiles } from "../middleware/fileValidate";
 
 const router = express.Router();
 
@@ -19,23 +20,23 @@ const router = express.Router();
 // Create Route: Admin or Approved Nurseries can post content
 router
   .route("/blog/new")
-  .post(isAuthenticatedUser, authorizeRoles("admin", "nursery"), createBlog);
+  .post(isAuthenticatedUser, authorizeRoles("admin", "nursery"), validateUploadedFiles({ allowVideo: false }), createBlog);
 
 router
   .route("/new")
-  .post(isAuthenticatedUser, authorizeRoles("admin", "nursery"), createBlog);
+  .post(isAuthenticatedUser, authorizeRoles("admin", "nursery"), validateUploadedFiles({ allowVideo: false }), createBlog);
 
 // Management Route: GET single by ID, PUT (Update) and DELETE actions
 router
   .route("/blog/manage/:id")
   .get(getBlogById)
-  .put(isAuthenticatedUser, authorizeRoles("admin", "nursery"), updateBlog)
+  .put(isAuthenticatedUser, authorizeRoles("admin", "nursery"), validateUploadedFiles({ allowVideo: false }), updateBlog)
   .delete(isAuthenticatedUser, authorizeRoles("admin", "nursery"), deleteBlog);
 
 router
   .route("/manage/:id")
   .get(getBlogById)
-  .put(isAuthenticatedUser, authorizeRoles("admin", "nursery"), updateBlog)
+  .put(isAuthenticatedUser, authorizeRoles("admin", "nursery"), validateUploadedFiles({ allowVideo: false }), updateBlog)
   .delete(isAuthenticatedUser, authorizeRoles("admin", "nursery"), deleteBlog);
 
 // ======================================================================

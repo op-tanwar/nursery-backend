@@ -7,13 +7,14 @@ import {
   getOrderReturnRequests,
 } from "../controllers/returnRequestController";
 import { isAuthenticatedUser, authorizeRoles } from "../middleware/auth";
+import { validateUploadedFiles } from "../middleware/fileValidate";
 
 const router = express.Router();
 
 // ======================================================================
 // 👤 CUSTOMER ROUTES
 // ======================================================================
-router.route("/create").post(isAuthenticatedUser, createReturnRequest);
+router.route("/create").post(isAuthenticatedUser, validateUploadedFiles({ allowVideo: false }), createReturnRequest);
 router.route("/order/:orderId").get(isAuthenticatedUser, getOrderReturnRequests);
 
 // ======================================================================

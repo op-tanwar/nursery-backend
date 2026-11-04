@@ -18,6 +18,7 @@ import {
 } from "../controllers/nurseryProfileController";
 import { isAuthenticatedUser, authorizeRoles } from "../middleware/auth";
 import { validateNurseryDocumentsMiddleware } from "../middleware/nurseryDocumentUpload";
+import { validateUploadedFiles } from "../middleware/fileValidate";
 
 const router = express.Router();
 
@@ -49,7 +50,7 @@ router
 router
   .route("/profile/me")
   .get(isAuthenticatedUser, authorizeRoles("nursery"), getMyNurseryProfile)
-  .put(isAuthenticatedUser, authorizeRoles("nursery"), updateNurseryProfileDetails);
+  .put(isAuthenticatedUser, authorizeRoles("nursery"), validateUploadedFiles({ allowVideo: false }), updateNurseryProfileDetails);
 
 // ======================================================================
 // 🛡️ SUPER ADMIN MANAGEMENT ENDPOINTS

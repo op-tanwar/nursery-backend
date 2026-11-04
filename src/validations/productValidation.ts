@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Request, Response, NextFunction } from "express";
 import ErrorHandler from "../utils/errorHandler";
+import { validateUploadedFiles } from "../middleware/fileValidate";
 
 // Helper to safely parse strings or arrays from FormData
 const stringToArray = z.preprocess((val) => {
@@ -262,6 +263,17 @@ export const seedsBulbsValidationSchema = baseProductSchema.extend({
 // Helper validation middleware for Express routes
 export const validateProductBody = (schema: z.ZodTypeAny, payloadKey?: string) => {
   return (req: Request, res: Response, next: NextFunction) => {
+    // 🛡️ Enforce image-only file validation for catalog product media
+    if (req.files && Object.keys(req.files).length > 0) {
+      let fileErr: any = null;
+      validateUploadedFiles({ allowVideo: false })(req, res, (err) => {
+        if (err) fileErr = err;
+      });
+      if (fileErr) {
+        return next(fileErr);
+      }
+    }
+
     let body = req.body || {};
 
     if (payloadKey && body[payloadKey] && typeof body[payloadKey] === "string") {

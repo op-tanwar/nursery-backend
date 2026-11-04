@@ -12,7 +12,6 @@ import path from "node:path";
 import fs from "node:fs";
 import mongoose from "mongoose";
 import { normalizeOrigin } from "./utils/security";
-import { validateUploadedFiles } from "./middleware/fileValidate";
 import ErrorHandler from "./utils/errorHandler";
 
 const app = express();
@@ -278,8 +277,8 @@ const apiRobotsShield = (req: express.Request, res: express.Response, next: expr
   next();
 };
 
-app.use("/api/v1", apiRobotsShield, apiLimiter, csrfGuard, validateUploadedFiles({ allowVideo: false }), mainRouter);
-app.use("/api", apiRobotsShield, apiLimiter, csrfGuard, validateUploadedFiles({ allowVideo: false }), mainRouter);
+app.use("/api/v1", apiRobotsShield, apiLimiter, csrfGuard, mainRouter);
+app.use("/api", apiRobotsShield, apiLimiter, csrfGuard, mainRouter);
 
 // 404 Handler for unmatched routes
 app.use((req, res, next) => {

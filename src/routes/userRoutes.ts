@@ -23,6 +23,7 @@ import {
   submitContactInquiry,
 } from "../controllers/userController";
 import { isAuthenticatedUser, authorizeRoles } from "../middleware/auth";
+import { validateUploadedFiles } from "../middleware/fileValidate";
 
 const router = Router();
 
@@ -83,8 +84,8 @@ router.post("/test-email", async (req: any, res: any) => {
 // ------------------------
 router.get("/me", isAuthenticatedUser, getUserDetails);
 router.put("/password/update", isAuthenticatedUser, updatePassword);
-router.put("/me/update", isAuthenticatedUser, updateProfile);
-router.put("/update", isAuthenticatedUser, updateProfile);
+router.put("/me/update", isAuthenticatedUser, validateUploadedFiles({ allowVideo: false }), updateProfile);
+router.put("/update", isAuthenticatedUser, validateUploadedFiles({ allowVideo: false }), updateProfile);
 router.post("/verify-email-change", isAuthenticatedUser, verifyEmailChange);
 router.post("/resend-email-otp", isAuthenticatedUser, resendEmailChangeOtp);
 

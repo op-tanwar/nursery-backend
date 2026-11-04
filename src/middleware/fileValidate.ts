@@ -8,18 +8,34 @@ export const validateUploadedFiles = (options?: { allowVideo?: boolean }) => {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (!req.files || Object.keys(req.files).length === 0) return next();
 
+    // Check if route context explicitly permits video uploads (e.g. unboxing / damage claims)
+    const isClaimRoute = Boolean(
+      req.originalUrl?.includes("/orders/claim") ||
+      req.path?.includes("/claim") ||
+      (req.baseUrl?.includes("/orders") && req.path?.includes("/claim"))
+    );
+    const allowVideo = Boolean(options?.allowVideo || isClaimRoute);
+
     const allowedMimeTypes = [
       "image/jpeg",
       "image/png",
       "image/webp",
       "image/jpg",
+      "image/gif",
       "application/pdf",
     ];
-    const allowedExtensions = [".jpg", ".jpeg", ".png", ".webp", ".pdf"];
+    const allowedExtensions = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".pdf"];
 
-    if (options?.allowVideo) {
-      allowedMimeTypes.push("video/mp4", "video/webm", "video/quicktime");
-      allowedExtensions.push(".mp4", ".webm", ".mov");
+    if (allowVideo) {
+      allowedMimeTypes.push(
+        "video/mp4",
+        "video/webm",
+        "video/quicktime",
+        "video/x-matroska",
+        "video/avi",
+        "video/mpeg"
+      );
+      allowedExtensions.push(".mp4", ".webm", ".mov", ".mkv", ".avi");
     }
 
     const filesArray: UploadedFile[] = [];
@@ -36,7 +52,12 @@ export const validateUploadedFiles = (options?: { allowVideo?: boolean }) => {
     for (const file of filesArray) {
       const fileExt = path.extname(file.name).toLowerCase();
       if (!allowedMimeTypes.includes(file.mimetype) || !allowedExtensions.includes(fileExt)) {
-        return next(new ErrorHandler("Security Exception: Invalid file payload type context.", 400));
+        const typeDesc = allowVideo
+          ? "images, PDFs, and approved video formats (mp4, webm, mov)"
+          : "images and PDFs";
+        return next(
+          new ErrorHandler(`Security Exception: Invalid file payload type context. Only ${typeDesc} are allowed.`, 400)
+        );
       }
     }
     next();
