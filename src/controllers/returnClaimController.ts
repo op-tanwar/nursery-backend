@@ -18,6 +18,7 @@ import {
   roundMoney,
   toPaise,
 } from "../utils/financialUtils";
+import Product from "../models/productModel";
 import { modelRegistry, resolveProductAndModel, getCaseInsensitiveModel } from "../utils/productRegistry";
 import {
   sendClaimAlertToAdmin,
@@ -782,15 +783,12 @@ export const updateClaimStatus = catchAsyncErrors(
 
         // Restock inventory if item is in restockable condition
         if (isRestockable) {
-          const TargetModel = getCaseInsensitiveModel(targetItem.itemModel);
-          if (TargetModel) {
-            await TargetModel.findByIdAndUpdate(
-              targetItem.item,
-              { $inc: { stock: targetItem.quantity } },
-              session ? { session } : {}
-            );
-            claim.inventoryAction = "RESTOCKED";
-          }
+          await Product.findByIdAndUpdate(
+            targetItem.item,
+            { $inc: { stock: targetItem.quantity } },
+            session ? { session } : {}
+          );
+          claim.inventoryAction = "RESTOCKED";
         } else {
           claim.inventoryAction = "DEFECTIVE_RECORDED";
         }
@@ -839,14 +837,11 @@ export const updateClaimStatus = catchAsyncErrors(
         claim.inventoryAction = "REPLACEMENT_DISPATCHED";
 
         // Deduct replacement stock from catalog
-        const TargetModel = getCaseInsensitiveModel(targetItem.itemModel);
-        if (TargetModel) {
-          await TargetModel.findByIdAndUpdate(
-            targetItem.item,
-            { $inc: { stock: -targetItem.quantity } },
-            session ? { session } : {}
-          );
-        }
+        await Product.findByIdAndUpdate(
+          targetItem.item,
+          { $inc: { stock: -targetItem.quantity } },
+          session ? { session } : {}
+        );
       }
 
       // Update Claim metadata & Timeline

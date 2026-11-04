@@ -2,14 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { Types } from "mongoose";
 import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import Order from "../models/orderModel";
-import Plant from "../models/plantsModel";
-import Pot from "../models/potsModel";
-import Accessory from "../models/accessoriesModel";
-import GardeningTool from "../models/gardeningToolsModel";
-import PlantCare from "../models/plantCareModel";
-import SeedsBulbs from "../models/seedsBulbsModel";
-import PlantStandsShelves from "../models/plantStandsShelvesModel";
-import ArtificialDriedPlant from "../models/artificialDriedPlantModel";
+import Product from "../models/productModel";
 import User from "../models/userModel";
 import Payout from "../models/payoutModel";
 import { getCaseInsensitiveModel } from "../utils/productRegistry";
@@ -392,15 +385,13 @@ const getGlobalPeriodStats = async (tf: string): Promise<IGlobalPeriodMetrics> =
 
 const resolveProductName = async (
   itemId: Types.ObjectId | string,
-  itemModel: string
+  itemModel?: string
 ): Promise<string> => {
-  const cacheKey = `pname:${itemModel}:${String(itemId)}`;
+  const cacheKey = `pname:${itemModel || "prod"}:${String(itemId)}`;
   const cached = await cacheManager.get<string>(cacheKey);
   if (cached) return cached;
 
-  const TargetModel = getCaseInsensitiveModel(itemModel);
-  if (!TargetModel) return "Unknown Product";
-  const doc = await TargetModel.findById(itemId).select("name").lean();
+  const doc = await Product.findById(itemId).select("name").lean();
   const name = (doc as any)?.name || "Unknown Product";
   await cacheManager.set(cacheKey, name, 600); // 10 min TTL
   return name;
@@ -531,44 +522,44 @@ export const getNurseryDashboardStats = catchAsyncErrors(
         },
       ]),
 
-      Plant.aggregate(stockCountPipeline({ nursery: nurseryId })),
-      Pot.aggregate(stockCountPipeline({ nursery: nurseryId })),
-      Accessory.aggregate(stockCountPipeline({ nursery: nurseryId })),
-      GardeningTool.aggregate(stockCountPipeline({ nursery: nurseryId })),
-      PlantCare.aggregate(stockCountPipeline({ nursery: nurseryId })),
-      SeedsBulbs.aggregate(stockCountPipeline({ nursery: nurseryId })),
-      PlantStandsShelves.aggregate(stockCountPipeline({ nursery: nurseryId })),
-      ArtificialDriedPlant.aggregate(stockCountPipeline({ nursery: nurseryId })),
+      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "plants" })),
+      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "pots" })),
+      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "accessories" })),
+      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "gardening-tools" })),
+      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "plant-care" })),
+      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "seeds-bulbs" })),
+      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "stands-shelves" })),
+      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "artificial-dried" })),
 
-      Plant.find({ nursery: nurseryId, stock: { $lt: 10 } })
+      Product.find({ nursery: nurseryId, category: "plants", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Pot.find({ nursery: nurseryId, stock: { $lt: 10 } })
+      Product.find({ nursery: nurseryId, category: "pots", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Accessory.find({ nursery: nurseryId, stock: { $lt: 10 } })
+      Product.find({ nursery: nurseryId, category: "accessories", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      GardeningTool.find({ nursery: nurseryId, stock: { $lt: 10 } })
+      Product.find({ nursery: nurseryId, category: "gardening-tools", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      PlantCare.find({ nursery: nurseryId, stock: { $lt: 10 } })
+      Product.find({ nursery: nurseryId, category: "plant-care", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      SeedsBulbs.find({ nursery: nurseryId, stock: { $lt: 10 } })
+      Product.find({ nursery: nurseryId, category: "seeds-bulbs", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      PlantStandsShelves.find({ nursery: nurseryId, stock: { $lt: 10 } })
+      Product.find({ nursery: nurseryId, category: "stands-shelves", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      ArtificialDriedPlant.find({ nursery: nurseryId, stock: { $lt: 10 } })
+      Product.find({ nursery: nurseryId, category: "artificial-dried", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
@@ -1105,38 +1096,38 @@ export const getAdminDashboardStats = catchAsyncErrors(
         .limit(10)
         .lean(),
 
-      Plant.aggregate(stockCountPipeline({})),
-      Pot.aggregate(stockCountPipeline({})),
-      Accessory.aggregate(stockCountPipeline({})),
-      GardeningTool.aggregate(stockCountPipeline({})),
-      PlantCare.aggregate(stockCountPipeline({})),
-      SeedsBulbs.aggregate(stockCountPipeline({})),
-      PlantStandsShelves.aggregate(stockCountPipeline({})),
-      ArtificialDriedPlant.aggregate(stockCountPipeline({})),
+      Product.aggregate(stockCountPipeline({ category: "plants" })),
+      Product.aggregate(stockCountPipeline({ category: "pots" })),
+      Product.aggregate(stockCountPipeline({ category: "accessories" })),
+      Product.aggregate(stockCountPipeline({ category: "gardening-tools" })),
+      Product.aggregate(stockCountPipeline({ category: "plant-care" })),
+      Product.aggregate(stockCountPipeline({ category: "seeds-bulbs" })),
+      Product.aggregate(stockCountPipeline({ category: "stands-shelves" })),
+      Product.aggregate(stockCountPipeline({ category: "artificial-dried" })),
 
-      Plant.find({ stock: { $lt: 10 } }).select("name stock price").limit(5).lean(),
-      Pot.find({ stock: { $lt: 10 } }).select("name stock price").limit(5).lean(),
-      Accessory.find({ stock: { $lt: 10 } })
+      Product.find({ category: "plants", stock: { $lt: 10 } }).select("name stock price").limit(5).lean(),
+      Product.find({ category: "pots", stock: { $lt: 10 } }).select("name stock price").limit(5).lean(),
+      Product.find({ category: "accessories", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      GardeningTool.find({ stock: { $lt: 10 } })
+      Product.find({ category: "gardening-tools", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      PlantCare.find({ stock: { $lt: 10 } })
+      Product.find({ category: "plant-care", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      SeedsBulbs.find({ stock: { $lt: 10 } })
+      Product.find({ category: "seeds-bulbs", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      PlantStandsShelves.find({ stock: { $lt: 10 } })
+      Product.find({ category: "stands-shelves", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      ArtificialDriedPlant.find({ stock: { $lt: 10 } })
+      Product.find({ category: "artificial-dried", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),

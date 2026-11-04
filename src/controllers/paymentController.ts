@@ -23,6 +23,7 @@ import {
 } from "../utils/orderEmailService";
 import sendEmail from "../utils/sendEmail";
 import { getPaymentFailedHtml, sendLowStockAlert } from "../templates/emails";
+import Product from "../models/productModel";
 import {
   getCaseInsensitiveModel,
   resolveProductAndModel,
@@ -626,20 +627,17 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
         }
 
         for (const item of verifiedOrderItems) {
-          const TargetModel = getCaseInsensitiveModel(item.itemModel);
-          if (TargetModel) {
-            const productDoc = await TargetModel.findById(item.item).session(session);
-            if (
-              productDoc &&
-              typeof productDoc.stock === "number" &&
-              productDoc.stock <= 5
-            ) {
-              lowStockAlertItems.push({
-                nurseryId: item.nursery?.toString(),
-                name: productDoc.name || "Product",
-                stock: productDoc.stock,
-              });
-            }
+          const productDoc = await Product.findById(item.item).session(session);
+          if (
+            productDoc &&
+            typeof productDoc.stock === "number" &&
+            productDoc.stock <= 5
+          ) {
+            lowStockAlertItems.push({
+              nurseryId: item.nursery?.toString(),
+              name: productDoc.name || "Product",
+              stock: productDoc.stock,
+            });
           }
         }
       } else {
@@ -647,8 +645,7 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
         let stockDepleted = false;
 
         for (const item of verifiedOrderItems) {
-          const TargetModel = getCaseInsensitiveModel(item.itemModel)!;
-          const updatedInventoryItem = await TargetModel.findOneAndUpdate(
+          const updatedInventoryItem = await Product.findOneAndUpdate(
             {
               _id: item.item,
               isActive: true,

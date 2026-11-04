@@ -6,14 +6,7 @@ import ErrorHandler from "../utils/errorHandler";
 import { resolveSlugOrRedirect } from "../utils/slugify";
 import NurseryProfile from "../models/nurseryProfileModel";
 import User from "../models/userModel";
-import Plant from "../models/plantsModel";
-import Pot from "../models/potsModel";
-import Accessory from "../models/accessoriesModel";
-import GardeningTool from "../models/gardeningToolsModel";
-import PlantCare from "../models/plantCareModel";
-import SeedsBulbs from "../models/seedsBulbsModel";
-import PlantStandsShelves from "../models/plantStandsShelvesModel";
-import ArtificialDriedPlant from "../models/artificialDriedPlantModel";
+import Product from "../models/productModel";
 import Order from "../models/orderModel";
 import { UploadedFile } from "express-fileupload";
 import cloudinary from "cloudinary";
@@ -604,26 +597,8 @@ export const getPublicVendorBySlug = catchAsyncErrors(
       ],
     };
 
-    // Fetch catalog products safely without throwing if product array is empty
-    const [
-      plants = [],
-      pots = [],
-      accessories = [],
-      gardeningTools = [],
-      plantCare = [],
-      seedsBulbs = [],
-      plantStands = [],
-      artificialDriedPlants = [],
-    ] = await Promise.all([
-      Plant.find(catalogFilter).select("-reviews").lean().catch(() => []),
-      Pot.find(catalogFilter).select("-reviews").lean().catch(() => []),
-      Accessory.find(catalogFilter).select("-reviews").lean().catch(() => []),
-      GardeningTool.find(catalogFilter).select("-reviews").lean().catch(() => []),
-      PlantCare.find(catalogFilter).select("-reviews").lean().catch(() => []),
-      SeedsBulbs.find(catalogFilter).select("-reviews").lean().catch(() => []),
-      PlantStandsShelves.find(catalogFilter).select("-reviews").lean().catch(() => []),
-      ArtificialDriedPlant.find(catalogFilter).select("-reviews").lean().catch(() => []),
-    ]);
+    // Fetch catalog products safely from unified Product collection
+    const products = await Product.find(catalogFilter).select("-reviews").lean().catch(() => []);
 
     const vendorSlug = profile.slug || slugify(profile.businessName || "nursery", { lower: true, strict: true });
     const vendorIdStr = String(profile._id);
@@ -674,32 +649,21 @@ export const getPublicVendorBySlug = catchAsyncErrors(
       emoji: p.coverImage?.url || fallbackEmoji,
     });
 
-    const formattedProducts = [
-      ...plants.map((p) =>
-        mapProduct(p, "plants", "Indoor Plants", "Bestseller", "#059669", "🌿")
-      ),
-      ...pots.map((p) =>
-        mapProduct(p, "pots", "Ceramic Pots", "Handmade", "#d97706", "🏺")
-      ),
-      ...accessories.map((a) =>
-        mapProduct(a, "accessories", "Plant Care", "Organic", "#16a34a", "🛠️")
-      ),
-      ...gardeningTools.map((t) =>
-        mapProduct(t, "gardening-tools", "Hand Tools", "Durable", "#0f766e", "🔧")
-      ),
-      ...plantCare.map((c) =>
-        mapProduct(c, "plant-care", "Organic Fertilizers", "Care", "#15803d", "🧴")
-      ),
-      ...seedsBulbs.map((s) =>
-        mapProduct(s, "seeds-bulbs", "Vegetable Seeds", "Grow", "#65a30d", "🌱")
-      ),
-      ...plantStands.map((s) =>
-        mapProduct(s, "plant-stands-shelves", "Plant Stands", "Display", "#b45309", "🪜")
-      ),
-      ...artificialDriedPlants.map((a) =>
-        mapProduct(a, "artificial-dried-plants", "Artificial Plants", "Decor", "#9f1239", "🥀")
-      ),
-    ];
+    const categoryMeta: Record<string, { type: string; defaultCat: string; badge: string; color: string; emoji: string }> = {
+      plants: { type: "plants", defaultCat: "Indoor Plants", badge: "Bestseller", color: "#059669", emoji: "🌿" },
+      pots: { type: "pots", defaultCat: "Ceramic Pots", badge: "Handmade", color: "#d97706", emoji: "🏺" },
+      accessories: { type: "accessories", defaultCat: "Plant Care", badge: "Organic", color: "#16a34a", emoji: "🛠️" },
+      "gardening-tools": { type: "gardening-tools", defaultCat: "Hand Tools", badge: "Durable", color: "#0f766e", emoji: "🔧" },
+      "plant-care": { type: "plant-care", defaultCat: "Organic Fertilizers", badge: "Care", color: "#15803d", emoji: "🧴" },
+      "seeds-bulbs": { type: "seeds-bulbs", defaultCat: "Vegetable Seeds", badge: "Grow", color: "#65a30d", emoji: "🌱" },
+      "stands-shelves": { type: "plant-stands-shelves", defaultCat: "Plant Stands", badge: "Display", color: "#b45309", emoji: "🪜" },
+      "artificial-dried": { type: "artificial-dried-plants", defaultCat: "Artificial Plants", badge: "Decor", color: "#9f1239", emoji: "🥀" },
+    };
+
+    const formattedProducts = products.map((p) => {
+      const meta = categoryMeta[p.category] || categoryMeta.plants;
+      return mapProduct(p, meta.type, meta.defaultCat, meta.badge, meta.color, meta.emoji);
+    });
 
     // Compute vendor statistics
     const ownerUser = profile.nursery as any;
@@ -839,17 +803,7 @@ export const getVendorProducts = catchAsyncErrors(
       isActive: { $ne: false },
     };
 
-    const [plants, pots, accessories, gardeningTools, plantCare, seedsBulbs, plantStands, artificialDriedPlants] =
-      await Promise.all([
-        Plant.find(catalogFilter).select("-reviews").lean(),
-        Pot.find(catalogFilter).select("-reviews").lean(),
-        Accessory.find(catalogFilter).select("-reviews").lean(),
-        GardeningTool.find(catalogFilter).select("-reviews").lean(),
-        PlantCare.find(catalogFilter).select("-reviews").lean(),
-        SeedsBulbs.find(catalogFilter).select("-reviews").lean(),
-        PlantStandsShelves.find(catalogFilter).select("-reviews").lean(),
-        ArtificialDriedPlant.find(catalogFilter).select("-reviews").lean(),
-      ]);
+    const products = await Product.find(catalogFilter).select("-reviews").lean().catch(() => []);
 
     const vendorSlug = profile.slug || slugify(profile.businessName || "nursery", { lower: true, strict: true });
     const vendorIdStr = String(profile._id);
@@ -884,16 +838,21 @@ export const getVendorProducts = catchAsyncErrors(
       emoji: p.coverImage?.url || fallbackEmoji,
     });
 
-    const formattedProducts = [
-      ...plants.map((p) => mapProduct(p, "plants", "Indoor Plants", "Bestseller", "#059669", "🌿")),
-      ...pots.map((p) => mapProduct(p, "pots", "Ceramic Pots", "Handmade", "#d97706", "🏺")),
-      ...accessories.map((a) => mapProduct(a, "accessories", "Plant Care", "Organic", "#16a34a", "🛠️")),
-      ...gardeningTools.map((t) => mapProduct(t, "gardening-tools", "Hand Tools", "Durable", "#0f766e", "🔧")),
-      ...plantCare.map((c) => mapProduct(c, "plant-care", "Organic Fertilizers", "Care", "#15803d", "🧴")),
-      ...seedsBulbs.map((s) => mapProduct(s, "seeds-bulbs", "Vegetable Seeds", "Grow", "#65a30d", "🌱")),
-      ...plantStands.map((s) => mapProduct(s, "plant-stands-shelves", "Plant Stands", "Display", "#b45309", "🪜")),
-      ...artificialDriedPlants.map((a) => mapProduct(a, "artificial-dried-plants", "Artificial Plants", "Decor", "#9f1239", "🥀")),
-    ];
+    const categoryMeta: Record<string, { type: string; defaultCat: string; badge: string; color: string; emoji: string }> = {
+      plants: { type: "plants", defaultCat: "Indoor Plants", badge: "Bestseller", color: "#059669", emoji: "🌿" },
+      pots: { type: "pots", defaultCat: "Ceramic Pots", badge: "Handmade", color: "#d97706", emoji: "🏺" },
+      accessories: { type: "accessories", defaultCat: "Plant Care", badge: "Organic", color: "#16a34a", emoji: "🛠️" },
+      "gardening-tools": { type: "gardening-tools", defaultCat: "Hand Tools", badge: "Durable", color: "#0f766e", emoji: "🔧" },
+      "plant-care": { type: "plant-care", defaultCat: "Organic Fertilizers", badge: "Care", color: "#15803d", emoji: "🧴" },
+      "seeds-bulbs": { type: "seeds-bulbs", defaultCat: "Vegetable Seeds", badge: "Grow", color: "#65a30d", emoji: "🌱" },
+      "stands-shelves": { type: "plant-stands-shelves", defaultCat: "Plant Stands", badge: "Display", color: "#b45309", emoji: "🪜" },
+      "artificial-dried": { type: "artificial-dried-plants", defaultCat: "Artificial Plants", badge: "Decor", color: "#9f1239", emoji: "🥀" },
+    };
+
+    const formattedProducts = products.map((p) => {
+      const meta = categoryMeta[p.category] || categoryMeta.plants;
+      return mapProduct(p, meta.type, meta.defaultCat, meta.badge, meta.color, meta.emoji);
+    });
 
     res.status(200).json({
       success: true,
@@ -935,18 +894,19 @@ export const getAdminVendorDetails = catchAsyncErrors(
 
     const nurseryUserId = profile.nursery?._id || profile.nursery;
 
-    const [plants, pots, accessories, gardeningTools, plantCare, seedsBulbs, plantStands, artificialDriedPlants, orders] =
-      await Promise.all([
-        Plant.find({ nursery: nurseryUserId }).lean(),
-        Pot.find({ nursery: nurseryUserId }).lean(),
-        Accessory.find({ nursery: nurseryUserId }).lean(),
-        GardeningTool.find({ nursery: nurseryUserId }).lean(),
-        PlantCare.find({ nursery: nurseryUserId }).lean(),
-        SeedsBulbs.find({ nursery: nurseryUserId }).lean(),
-        PlantStandsShelves.find({ nursery: nurseryUserId }).lean(),
-        ArtificialDriedPlant.find({ nursery: nurseryUserId }).lean(),
-        Order.find({ "orderItems.nursery": nurseryUserId }).lean(),
-      ]);
+    const [products, orders] = await Promise.all([
+      Product.find({ nursery: nurseryUserId }).lean(),
+      Order.find({ "orderItems.nursery": nurseryUserId }).lean(),
+    ]);
+
+    const plants = products.filter((p) => p.category === "plants");
+    const pots = products.filter((p) => p.category === "pots");
+    const accessories = products.filter((p) => p.category === "accessories");
+    const gardeningTools = products.filter((p) => p.category === "gardening-tools");
+    const plantCare = products.filter((p) => p.category === "plant-care");
+    const seedsBulbs = products.filter((p) => p.category === "seeds-bulbs");
+    const plantStands = products.filter((p) => p.category === "stands-shelves");
+    const artificialDriedPlants = products.filter((p) => p.category === "artificial-dried");
 
     const totalGrossRevenue = orders.reduce((sum, order) => {
       const nurseryItems = order.orderItems.filter((i: any) => String(i.nursery) === String(nurseryUserId));

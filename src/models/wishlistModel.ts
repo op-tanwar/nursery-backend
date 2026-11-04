@@ -14,21 +14,11 @@ const wishlistSchema = new Schema<IWishlistDocument>(
         product: {
           type: Schema.Types.ObjectId,
           required: true,
-          refPath: "items.itemModel",
+          ref: "Product",
         },
         itemModel: {
           type: String,
-          required: true,
-          enum: [
-            "Plant",
-            "Pot",
-            "Accessory",
-            "GardeningTool",
-            "PlantCare",
-            "SeedsBulbs",
-            "PlantStandsShelves",
-            "ArtificialDriedPlant"
-          ],
+          default: "Product",
         },
       },
     ],

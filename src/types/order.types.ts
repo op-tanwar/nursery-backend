@@ -8,7 +8,6 @@ declare global {
   }
 }
 
-
 export interface ICommissionAudit {
   /** Commission amount (₹) at time of sale */
   originalCommission: number;
@@ -41,16 +40,19 @@ export interface IRefundDetails {
 }
 
 export interface IOrderItem {
+  _id?: Types.ObjectId | any;
   itemModel:
-  | "Plant"
-  | "Pot"
-  | "Accessory"
-  | "GardeningTool"
-  | "PlantCare"
-  | "SeedsBulbs"
-  | "PlantStandsShelves"
-  | "ArtificialDriedPlant";
-  item: Types.ObjectId; // Generic field supporting any item type
+    | "Product"
+    | "Plant"
+    | "Pot"
+    | "Accessory"
+    | "GardeningTool"
+    | "PlantCare"
+    | "SeedsBulbs"
+    | "PlantStandsShelves"
+    | "ArtificialDriedPlant"
+    | string;
+  item: Types.ObjectId | any; // Generic field supporting any item type
   quantity: number;
   price: number;
   priceAtPurchase: number; // Snapshot of the effective price paid at purchase time
@@ -66,33 +68,27 @@ export interface IOrderItem {
   nursery: Types.ObjectId;
   status: "Processing" | "Shipped" | "Out for Delivery" | "Delivered" | "Cancelled" | "Claimed";
   claim?: IItemClaim;
-  commissionAudit?: ICommissionAudit;
   refundDetails?: IRefundDetails;
-  _id?: Types.ObjectId;
-}
-
-
-export interface IShippingInfo {
-  name: string;
-  phone: string;
-  address: string;
-  city: string;
-  state: string;
-  country: string;
-  pinCode: string;
-}
-
-export interface IPaymentInfo {
-  id: string;
-  orderId: string;
-  status: string;
+  commissionAudit?: ICommissionAudit;
 }
 
 export interface IOrder extends Document {
-  shippingInfo: IShippingInfo;
+  shippingInfo: {
+    name: string;
+    phone: string;
+    address: string;
+    city: string;
+    state: string;
+    country: string;
+    pinCode: string;
+  };
   orderItems: IOrderItem[];
   user: Types.ObjectId;
-  paymentInfo: IPaymentInfo;
+  paymentInfo: {
+    id: string;
+    orderId: string;
+    status: string;
+  };
   itemsPrice: number;
   taxPrice: number;
   shippingPrice: number;

@@ -3,7 +3,7 @@ import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import ErrorHandler from "../utils/errorHandler";
 import Wishlist from "../models/wishlistModel";
 import NurseryProfile from "../models/nurseryProfileModel";
-import { findProductAndModel } from "../utils/productRegistry";
+import Product from "../models/productModel";
 import { IWishlistDocument } from "../types/cartWishlist.types";
 import cacheManager from "../utils/cacheManager";
 import { getActiveNurseryIds, ACTIVE_NURSERIES_CACHE_KEY } from "./cartController";
@@ -16,8 +16,8 @@ export const toggleWishlistItem = catchAsyncErrors(
 
     if (!productId) return next(new ErrorHandler("productId is required", 400));
 
-    const { product, modelName } = await findProductAndModel(productId);
-    if (!product || !modelName) {
+    const product = await Product.findById(productId);
+    if (!product) {
       return next(new ErrorHandler("Product not found in system catalogs", 404));
     }
 
@@ -32,7 +32,7 @@ export const toggleWishlistItem = catchAsyncErrors(
     if (!wishlist) {
       const newWishlist = await Wishlist.create({
         user: userId,
-        items: [{ product: productId, itemModel: modelName }]
+        items: [{ product: productId, itemModel: "Product" }]
       });
 
       const populatedWishlist = await Wishlist.findById(newWishlist._id).populate({
@@ -48,7 +48,7 @@ export const toggleWishlistItem = catchAsyncErrors(
     if (itemIndex > -1) {
       wishlist.items.splice(itemIndex, 1);
     } else {
-      wishlist.items.push({ product: productId, itemModel: modelName });
+      wishlist.items.push({ product: productId, itemModel: "Product" });
     }
 
     await wishlist.save();

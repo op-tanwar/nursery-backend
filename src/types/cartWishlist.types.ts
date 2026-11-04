@@ -1,6 +1,7 @@
 import { Document, Types } from "mongoose";
 
 export type ProductModelType =
+  | "Product"
   | "Plant"
   | "Pot"
   | "Accessory"

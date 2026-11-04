@@ -6,7 +6,7 @@ import NurseryProfile from "../models/nurseryProfileModel";
 import sendEmail, { getEmailConfig, EmailResult } from "../utils/sendEmail";
 // Import productRegistry to guarantee all catalog schemas (Plant, Pot, Accessory, etc.)
 // are registered in Mongoose memory before dynamic refPath populations occur
-import "../utils/productRegistry";
+import "../models/productModel";
 import {
   getAccountWelcomeHtml,
   getPasswordResetHtml,

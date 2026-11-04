@@ -3,6 +3,7 @@ import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import ErrorHandler from "../utils/errorHandler";
 import Order from "../models/orderModel";
 import TransactionLedger from "../models/transactionLedgerModel";
+import Product from "../models/productModel";
 import {
   modelRegistry,
   getCaseInsensitiveModel,
@@ -568,16 +569,13 @@ export const updateOrderAdmin = catchAsyncErrors(
           // 🛡️ IDEMPOTENCY GUARD: Skip items already cancelled — never reverse commission twice
           if (item.status === "Cancelled") continue;
 
-          // Restock inventory
-          const TargetModel = getCaseInsensitiveModel(item.itemModel);
-          if (TargetModel) {
-            const updateOpts = session ? { session } : {};
-            await TargetModel.findByIdAndUpdate(
-              item.item,
-              { $inc: { stock: item.quantity } },
-              updateOpts
-            );
-          }
+          // Restock inventory directly on unified Product model
+          const updateOpts = session ? { session } : {};
+          await Product.findByIdAndUpdate(
+            item.item,
+            { $inc: { stock: item.quantity } },
+            updateOpts
+          );
 
           // 💰 Calculate reversal amount using centralized paise-safe math
           const lineGross = calcLineGross(item.price, item.quantity);
@@ -758,11 +756,8 @@ export const updateOrderNursery = catchAsyncErrors(
           }
 
           if (status === "Cancelled") {
-            const TargetModel = getCaseInsensitiveModel(item.itemModel);
-            if (TargetModel) {
-              const updateOpts = session ? { session } : {};
-              await TargetModel.findByIdAndUpdate(item.item, { $inc: { stock: item.quantity } }, updateOpts);
-            }
+            const updateOpts = session ? { session } : {};
+            await Product.findByIdAndUpdate(item.item, { $inc: { stock: item.quantity } }, updateOpts);
 
             // 💰 Calculate reversal amount using centralized paise-safe math
             const lineGross = calcLineGross(item.price, item.quantity);
@@ -949,11 +944,8 @@ export const deleteOrder = catchAsyncErrors(
       if (order.orderStatus !== "Cancelled") {
         for (const item of order.orderItems) {
           if (item.status !== "Cancelled") {
-            const TargetModel = getCaseInsensitiveModel(item.itemModel);
-            if (TargetModel) {
-              const updateOpts = session ? { session } : {};
-              await TargetModel.findByIdAndUpdate(item.item, { $inc: { stock: item.quantity } }, updateOpts);
-            }
+            const updateOpts = session ? { session } : {};
+            await Product.findByIdAndUpdate(item.item, { $inc: { stock: item.quantity } }, updateOpts);
           }
         }
 

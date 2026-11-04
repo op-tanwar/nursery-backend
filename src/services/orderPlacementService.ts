@@ -13,6 +13,7 @@ import { processFallbackRefund } from "./fallbackRefundService";
 import { checkCartAvailability } from "../controllers/cartController";
 import { verifyCouponInternal } from "../controllers/couponController";
 import { checkCartItemsPincodeServiceability } from "../utils/pincodeService";
+import Product from "../models/productModel";
 import {
   getCaseInsensitiveModel,
   resolveProductAndModel,
@@ -159,12 +160,10 @@ export const calculateAndVerifyOrderTotals = async (
     const targetId = item.productId || item.item || item.id || item._id;
     const quantity = Math.max(1, Number(item.quantity) || 1);
 
-    const { product: dbProduct, modelName } = await resolveProductAndModel(
-      String(targetId),
-      item.itemModel
-    );
+    const dbProduct = await Product.findById(targetId);
+    const modelName = "Product";
 
-    if (!dbProduct || !modelName) {
+    if (!dbProduct) {
       throw new ErrorHandler(`Product reference not found: ${targetId}`, 404);
     }
 
@@ -302,16 +301,13 @@ export const deductInventory = async (
     }
 
     for (const item of items) {
-      const TargetModel = getCaseInsensitiveModel(item.itemModel);
-      if (TargetModel) {
-        const productDoc = await TargetModel.findById(item.item).session(session || null);
-        if (productDoc && typeof productDoc.stock === "number" && productDoc.stock <= 5) {
-          lowStockAlertItems.push({
-            nurseryId: item.nursery?.toString(),
-            name: productDoc.name || "Product",
-            stock: productDoc.stock,
-          });
-        }
+      const productDoc = await Product.findById(item.item).session(session || null);
+      if (productDoc && typeof productDoc.stock === "number" && productDoc.stock <= 5) {
+        lowStockAlertItems.push({
+          nurseryId: item.nursery?.toString(),
+          name: productDoc.name || "Product",
+          stock: productDoc.stock,
+        });
       }
     }
   } else {
@@ -326,13 +322,9 @@ export const deductInventory = async (
     }> = [];
 
     for (const item of items) {
-      const TargetModel = getCaseInsensitiveModel(item.itemModel);
-      if (!TargetModel) {
-        throw new Error(`Invalid item model: ${item.itemModel}`);
-      }
       const targetItemId = new mongoose.Types.ObjectId(item.item);
 
-      const updatedStock = await TargetModel.findOneAndUpdate(
+      const updatedStock = await Product.findOneAndUpdate(
         {
           _id: targetItemId,
           isActive: true,
@@ -359,7 +351,7 @@ export const deductInventory = async (
       }
 
       successfullyDeducted.push({
-        model: TargetModel,
+        model: Product,
         id: targetItemId,
         quantity: Number(item.quantity),
       });

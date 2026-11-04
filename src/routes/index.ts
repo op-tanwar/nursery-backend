@@ -1,12 +1,5 @@
 import express from "express";
-import plantRoutes from "./plantsRoute";
-import potRoutes from "./potsRoute";
-import accessoryRoutes from "./accessoriesRoute";
-import gardeningToolsRoutes from "./gardeningToolsRoute";
-import plantCareRoutes from "./plantCareRoute";
-import plantStandsShelvesRoutes from "./plantStandsShelvesRoute";
-import seedsBulbsRoutes from "./seedsBulbsRoute";
-import artificialDriedPlantRoutes from "./artificialDriedPlantRoute";
+import productRoutes from "./productRoute";
 import userRoutes from "./userRoutes";
 import orderRouter from "./ordersRoute";
 import nurseryProfileRoutes from "./nurseryProfileRoute";
@@ -36,29 +29,9 @@ mainRouter.use("/auth", authRoutes);
 // 🚀 PLUGGING ALL CORE PRODUCTION ENDPOINTS
 // ======================================================================
 
-// 🌿 Plants management & marketplace routes
-mainRouter.use("/plants", plantRoutes);
-
-// 🏺 Pots management, Planters & Terracotta marketplace routes
-mainRouter.use("/pots", potRoutes);
-
-// 🛠️ Gardening Accessories, Tools & Fertilizers inventory routes
-mainRouter.use("/accessories", accessoryRoutes);
-
-// ✂️ Gardening Tools & Equipment routes
-mainRouter.use("/gardening-tools", gardeningToolsRoutes);
-
-// 🧪 Plant Care, Soils & Fertilizers routes
-mainRouter.use("/plant-care", plantCareRoutes);
-
-// 🪜 Plant Stands & Shelves inventory routes
-mainRouter.use("/plant-stands-shelves", plantStandsShelvesRoutes);
-
-// 🌱 Seeds & Bulbs marketplace routes
-mainRouter.use("/seeds-bulbs", seedsBulbsRoutes);
-
-// 🌵 Artificial & Dried Plants marketplace routes
-mainRouter.use("/artificial-dried-plants", artificialDriedPlantRoutes);
+// 🛍️ Unified Polymorphic Product Catalog routes
+mainRouter.use("/products", productRoutes);
+mainRouter.use("/product", productRoutes);
 
 // 👤 Customer & identity system routes (Auth/Profile)
 mainRouter.use("/users", userRoutes);
@@ -93,28 +66,30 @@ mainRouter.use("/marketing", blogRoutes);
 mainRouter.use("/newsletter", newsletterRoutes);
 
 // 🛒 Cart and Wishlist management routes (Live Inventory Sync)
-mainRouter.use("/shop", cartWishlistRouter);
+mainRouter.use("/cart", cartWishlistRouter);
+mainRouter.use("/wishlist", cartWishlistRouter);
 
-// 📊 FIXED: Dashboard routing path error corrected from "/dashobard" to "/dashboard"
+// 📊 Dashboard metrics, analytics, inventory charts & financial reports
 mainRouter.use("/dashboard", dashboardRoutes);
 
-// 🎟️ Promotional Coupons, Discounts & Seasonal Offers Management
-mainRouter.use("/promotions", couponRoutes);
-mainRouter.use("/coupon", couponRoutes);
+// 🎟️ Coupons, discount vouchers and automated promotional codes
 mainRouter.use("/coupons", couponRoutes);
+mainRouter.use("/coupon", couponRoutes);
 
-// 📦 Bulk & Corporate Greenery Orders (B2B Request Engine)
+// 📦 Bulk orders corporate inquiries and nursery wholesale quotes
+mainRouter.use("/bulk-order", bulkOrderRoutes);
 mainRouter.use("/bulk-orders", bulkOrderRoutes);
 
-// 💰 Dynamic Payout API Engine (Nursery & Admin)
+// 💸 Direct Bank Payouts, Merchant settlements and financial reconciliation
 mainRouter.use("/payouts", payoutRoutes);
+mainRouter.use("/payout", payoutRoutes);
 
-// 🏷️ Category-wise Dynamic Tax (GST) Management Engine
-mainRouter.use("/taxes", taxRoutes);
-mainRouter.use("/admin/taxes", taxRoutes);
-
-// 🪙 Category-wise Dynamic Commission Management Engine
+// ⚖️ Platform dynamic commission rate configurations and nursery tiering
 mainRouter.use("/commissions", commissionRoutes);
-mainRouter.use("/admin/commissions", commissionRoutes);
+mainRouter.use("/commission", commissionRoutes);
+
+// 🏛️ Dynamic GST tax percentages and product HSN codes engine
+mainRouter.use("/taxes", taxRoutes);
+mainRouter.use("/tax", taxRoutes);
 
 export default mainRouter;

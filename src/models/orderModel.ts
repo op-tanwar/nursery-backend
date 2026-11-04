@@ -17,22 +17,12 @@ const orderSchema = new Schema<IOrder>(
       {
         itemModel: {
           type: String,
-          required: true,
-          enum: [
-            "Plant",
-            "Pot",
-            "Accessory",
-            "GardeningTool",
-            "PlantCare",
-            "SeedsBulbs",
-            "PlantStandsShelves",
-            "ArtificialDriedPlant"
-          ],
+          default: "Product",
         },
         item: {
           type: Schema.Types.ObjectId,
           required: true,
-          refPath: "orderItems.itemModel",
+          ref: "Product",
         },
         quantity: { type: Number, required: true, min: [1, "Quantity cannot be less than 1"] },
         price: { type: Number, required: true },
@@ -134,7 +124,7 @@ orderSchema.index({ orderStatus: 1 });
 orderSchema.index({ createdAt: -1 });
 orderSchema.index({ "paymentInfo.orderId": 1 });
 
-// 🛡️ FIXED: High-performance compound unique processing check configuration added to intercept fast multi-submit/replay queries
+// 🛡️ High-performance compound unique processing check configuration added to intercept fast multi-submit/replay queries
 orderSchema.index({ "paymentInfo.id": 1 }, { unique: true, sparse: true });
 
 export default model<IOrder>("Order", orderSchema);

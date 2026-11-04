@@ -3,6 +3,7 @@ import StockReservation, {
   IStockReservation,
   IStockReservationItem,
 } from "../models/stockReservationModel";
+import Product from "../models/productModel";
 import { getCaseInsensitiveModel } from "../utils/productRegistry";
 import {
   acquireLock,
@@ -44,22 +45,6 @@ export const reserveStockForItems = async (
   const lockedItems: ReservationLockItem[] = [];
 
   for (const item of items) {
-    const TargetModel = getCaseInsensitiveModel(item.itemModel);
-    if (!TargetModel) {
-      // Unknown model — rollback all previously locked items
-      await rollbackLockedItems(lockedItems, session);
-      return {
-        success: false,
-        lockedItems: [],
-        failedItem: {
-          productId: item.productId,
-          itemModel: item.itemModel,
-          quantity: item.quantity,
-          reason: `Unknown product model: ${item.itemModel}`,
-        },
-      };
-    }
-
     const productId = new mongoose.Types.ObjectId(item.productId);
     const quantity = Math.max(1, Number(item.quantity));
 
@@ -72,7 +57,7 @@ export const reserveStockForItems = async (
 
     try {
       // Atomic conditional update: only increment reservedStock if availableStock >= quantity
-      const updated = await TargetModel.findOneAndUpdate(
+      const updated = await Product.findOneAndUpdate(
         {
           _id: productId,
           isActive: true,
@@ -144,14 +129,11 @@ export const rollbackLockedItems = async (
 ): Promise<void> => {
   for (const item of items) {
     try {
-      const TargetModel = getCaseInsensitiveModel(item.itemModel);
-      if (TargetModel) {
-        await TargetModel.findByIdAndUpdate(
-          item.productId,
-          { $inc: { reservedStock: -Math.max(1, Number(item.quantity)) } },
-          session ? { session } : {}
-        );
-      }
+      await Product.findByIdAndUpdate(
+        item.productId,
+        { $inc: { reservedStock: -Math.max(1, Number(item.quantity)) } },
+        session ? { session } : {}
+      );
     } catch (err) {
       console.error(
         `🚨 [StockReservation] Rollback error for ${item.itemModel} (${item.productId}):`,
@@ -263,19 +245,16 @@ export const commitStockReservation = async (
 
   // Pending reservation found — commit stock deduction
   for (const item of reservation.items) {
-    const TargetModel = getCaseInsensitiveModel(item.itemModel);
-    if (TargetModel) {
-      await TargetModel.findByIdAndUpdate(
-        item.productId,
-        {
-          $inc: {
-            stock: -Number(item.quantity),
-            reservedStock: -Number(item.quantity),
-          },
+    await Product.findByIdAndUpdate(
+      item.productId,
+      {
+        $inc: {
+          stock: -Number(item.quantity),
+          reservedStock: -Number(item.quantity),
         },
-        session ? { session } : {}
-      );
-    }
+      },
+      session ? { session } : {}
+    );
   }
 
   reservation.status = "COMMITTED";
@@ -326,16 +305,13 @@ export const releaseStockReservation = async (
   }
 
   for (const item of reservation.items) {
-    const TargetModel = getCaseInsensitiveModel(item.itemModel);
-    if (TargetModel) {
-      await TargetModel.findByIdAndUpdate(
-        item.productId,
-        {
-          $inc: { reservedStock: -Number(item.quantity) },
-        },
-        session ? { session } : {}
-      );
-    }
+    await Product.findByIdAndUpdate(
+      item.productId,
+      {
+        $inc: { reservedStock: -Number(item.quantity) },
+      },
+      session ? { session } : {}
+    );
   }
 
   reservation.status = "RELEASED";

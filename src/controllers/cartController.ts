@@ -4,7 +4,7 @@ import ErrorHandler from "../utils/errorHandler";
 import Cart from "../models/cartModel";
 import User from "../models/userModel";
 import NurseryProfile from "../models/nurseryProfileModel";
-import { findProductAndModel } from "../utils/productRegistry";
+import Product from "../models/productModel";
 import {
   ICartDocument,
   IEnrichedCart,
@@ -256,8 +256,8 @@ export const addToCart = catchAsyncErrors(
       return next(new ErrorHandler("Valid productId and quantity are required", 400));
     }
 
-    const { product, modelName } = await findProductAndModel(productId);
-    if (!product || !modelName) {
+    const product = await Product.findById(productId);
+    if (!product) {
       return next(new ErrorHandler("Product not found in system catalogs", 404));
     }
 
@@ -277,7 +277,7 @@ export const addToCart = catchAsyncErrors(
       }
       cart = await Cart.create({
         user: userId,
-        items: [{ product: productId, itemModel: modelName, quantity, nursery: product.nursery }]
+        items: [{ product: productId, itemModel: "Product", quantity, nursery: product.nursery }]
       }) as unknown as ICartDocument;
     } else {
       const itemIndex = cart.items.findIndex((item) => item.product.toString() === productId);
@@ -292,7 +292,7 @@ export const addToCart = catchAsyncErrors(
         if (product.stock < quantity) {
           return next(new ErrorHandler(`Only ${product.stock} units available`, 400));
         }
-        cart.items.push({ product: productId, itemModel: modelName, quantity, nursery: product.nursery });
+        cart.items.push({ product: productId, itemModel: "Product", quantity, nursery: product.nursery });
       }
       await cart.save();
     }
@@ -317,7 +317,7 @@ export const updateCartQuantity = catchAsyncErrors(
       return next(new ErrorHandler("Valid productId and quantity required", 400));
     }
 
-    const { product } = await findProductAndModel(productId);
+    const product = await Product.findById(productId);
     if (!product) return next(new ErrorHandler("Product not found", 404));
 
     // 🛑 सुरक्षा चेक: ब्लॉक की गई नर्सरी की क्वांटिटी अपडेट न करने दें
@@ -420,8 +420,8 @@ export const syncCart = catchAsyncErrors(
       const prodId = rawId ? String(rawId).trim() : null;
       if (!prodId) continue;
 
-      const { product, modelName } = await findProductAndModel(prodId);
-      if (!product || !modelName) continue;
+      const product = await Product.findById(prodId);
+      if (!product) continue;
 
       const requestedQty = Math.max(1, Number(guestItem.quantity) || 1);
       const itemIndex = cart.items.findIndex(
@@ -436,7 +436,7 @@ export const syncCart = catchAsyncErrors(
         if (targetQty > 0) {
           cart.items.push({
             product: prodId as any,
-            itemModel: modelName,
+            itemModel: "Product",
             quantity: targetQty,
             nursery: product.nursery,
           });
