@@ -54,6 +54,10 @@ import {
   checkCartItemsPincodeServiceability,
   isPincodeServiceable,
 } from "../utils/pincodeService";
+import {
+  processOrderPlacement,
+  OrderPlacementService,
+} from "../services/orderPlacementService";
 
 export { modelRegistry, getCaseInsensitiveModel, calculateServerShippingAndTax };
 
@@ -67,527 +71,60 @@ export const createNewOrder = catchAsyncErrors(
       razorpay_payment_id: req.body.razorpay_payment_id,
       razorpay_signature: req.body.razorpay_signature,
     };
-    const { shippingInfo, orderItems, couponCode, coupon } = req.body;
+    const {
+      shippingInfo,
+      orderItems,
+      couponCode,
+      coupon,
+      shippingAddress,
+      pincode,
+      pinCode,
+    } = req.body;
 
-    if (!paymentInfo || !paymentInfo.razorpay_order_id || !paymentInfo.razorpay_payment_id || !paymentInfo.razorpay_signature) {
-      return next(new ErrorHandler("Payment details (order_id, payment_id, signature) are incomplete or missing", 400));
-    }
-
-    if (!orderItems || !Array.isArray(orderItems) || orderItems.length === 0) {
-      return next(new ErrorHandler("Order items list is empty or invalid.", 400));
-    }
-
-    // 🛡️ CHECKOUT GUARD: Ensure customer's cart does not contain unavailable items
-    if (req.user?._id) {
-      const cartCheck = await checkCartAvailability(req.user._id);
-      if (!cartCheck.isValid) {
-        const itemNames = cartCheck.unavailableItems.map((u) => `"${u.name}"`).join(", ");
-        return next(
-          new ErrorHandler(
-            `Your cart contains unavailable item(s): ${itemNames}. Please remove or save these items for later before placing an order.`,
-            400
-          )
-        );
-      }
-    }
-
-    if (!process.env.RAZORPAY_KEY_SECRET) {
-      return next(new ErrorHandler("Critical production cryptographic environment variables missing.", 500));
-    }
-
-    // 🔒 1. CRYPTOGRAPHIC SIGNATURE VERIFICATION (Zero bypass allowed)
-    const generatedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(`${paymentInfo.razorpay_order_id}|${paymentInfo.razorpay_payment_id}`)
-      .digest("hex");
-
-    const bufferGenerated = Buffer.from(generatedSignature, "utf-8");
-    const bufferReceived = Buffer.from(paymentInfo.razorpay_signature, "utf-8");
-
-    if (bufferGenerated.length !== bufferReceived.length || !crypto.timingSafeEqual(bufferGenerated, bufferReceived)) {
-      return next(new ErrorHandler("Payment verification failed! Invalid or tampered transaction credentials.", 400));
-    }
-
-    // 🔒 2. VERIFY ORDER RECORD WITH RAZORPAY GATEWAY DIRECTLY
-    const razorpay = getRazorpayInstance();
-    let rzpOrder: any;
-    try {
-      rzpOrder = await razorpay.orders.fetch(paymentInfo.razorpay_order_id);
-    } catch (err: any) {
-      return next(new ErrorHandler(`Payment gateway order verification failed: ${err.message}`, 400));
-    }
-
-    const taxMap = await getActiveTaxMap();
-
-    // 🔒 3. RECALCULATE AUTHORITATIVE PRICES FRESHLY FROM MONGODB (DISCARD CLIENT PRICES)
-    const verifiedOrderItems: any[] = [];
-    const authoritativePriceItems: Array<{
-      price: number;
-      discountPrice?: number;
-      quantity: number;
-      itemModel?: string;
-      category?: string;
-    }> = [];
-
-    const dbProductsCache: Array<{ dbProduct: any; modelName: string; quantity: number }> = [];
-
-    for (const item of orderItems) {
-      const targetId = item.productId || item.item || item.id || item._id;
-      const quantity = Math.max(1, Number(item.quantity) || 1);
-
-      const { product: dbProduct, modelName } = await resolveProductAndModel(
-        String(targetId),
-        item.itemModel
-      );
-
-      if (!dbProduct || !modelName) {
-        return next(new ErrorHandler(`Product reference identity context vanished: ${targetId}`, 404));
-      }
-
-      if (dbProduct.isActive === false) {
-        return next(new ErrorHandler(`Product ${dbProduct.name} is no longer active for commerce transactions.`, 400));
-      }
-
-      if (dbProduct.nursery) {
-        const nurseryProfile = await NurseryProfile.findOne({ nursery: dbProduct.nursery }).lean();
-        if (nurseryProfile && !nurseryProfile.isActive) {
-          return next(new ErrorHandler(`Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`, 400));
-        }
-      }
-
-      authoritativePriceItems.push({
-        price: dbProduct.price,
-        discountPrice: dbProduct.discountPrice || 0,
-        quantity,
-        itemModel: modelName,
-        category: dbProduct.category,
-      });
-
-      dbProductsCache.push({ dbProduct, modelName, quantity });
-    }
-
-    // 🛡️ Strictly calculate metrics server-side, discarding raw input parameters
-    const authoritativeTotals = calculateAuthoritativeTotals(authoritativePriceItems, taxMap);
-
-    // 🎟️ Authoritative Coupon Validation
-    const rawCoupon = couponCode || coupon || rzpOrder.notes?.couponCode;
-    let appliedCouponCode: string | undefined;
-    let couponDiscountAmount = 0;
-
-    if (rawCoupon && typeof rawCoupon === "string" && rawCoupon.trim()) {
-      try {
-        const verifiedCoupon = await verifyCouponInternal(
-          rawCoupon,
-          authoritativeTotals.itemsPrice,
-          req.user?._id
-        );
-        appliedCouponCode = verifiedCoupon.couponCode;
-        couponDiscountAmount = verifiedCoupon.discountAmount;
-      } catch (couponErr: any) {
-        console.error("🚨 [Coupon Verification Failed in createNewOrder]:", couponErr.message || couponErr);
-        return next(couponErr);
-      }
-    }
-
-    const couponDiscountPaise = toPaise(couponDiscountAmount);
-    const expectedAmountPaise = Math.max(100, Math.round(authoritativeTotals.totalPricePaise - couponDiscountPaise));
-
-    // ⚡ Cross check Gateway charged amount with authoritative catalog total
-    const chargedAmountPaise = Number(rzpOrder.amount);
-
-    if (chargedAmountPaise < expectedAmountPaise) {
-      console.error(
-        `🚨 [Security Alert] Underpayment detected! Catalog & Coupon require ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise). User: ${req.user?._id}`
-      );
-      return next(
-        new ErrorHandler(
-          `Payment amount mismatch! Expected ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise).`,
-          400
-        )
-      );
-    }
-
-    if (chargedAmountPaise > expectedAmountPaise) {
-      console.warn(
-        `⚠️ [Payment Audit] Gateway charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise) while current catalog total is ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise). Permitting order confirmation to preserve customer funds.`
-      );
-    }
-
-    // Build verified items using itemTaxSnapshots
-    for (let i = 0; i < dbProductsCache.length; i++) {
-      const { dbProduct, modelName, quantity } = dbProductsCache[i];
-      const effectivePrice = getEffectivePrice(dbProduct.price, dbProduct.discountPrice);
-      const taxSnapshot = authoritativeTotals.itemTaxSnapshots[i];
-
-      const lineGross = calcLineGross(effectivePrice, quantity);
-      const commissionInfo = await getEffectiveCommission(dbProduct.nursery, modelName);
-      const commissionRate = commissionInfo.rate;
-      const grossPaise = toPaise(lineGross);
-      const lineCommission = toRupees(Math.round(grossPaise * commissionRate));
-      const lineNurseryEarnings = roundMoney(lineGross - lineCommission);
-
-      verifiedOrderItems.push({
-        item: dbProduct._id,
-        itemModel: modelName,
-        quantity,
-        price: effectivePrice,
-        priceAtPurchase: effectivePrice, // 🛡️ Snapshot exact purchase price
-        originalPrice: dbProduct.price,
-        discountPrice: dbProduct.discountPrice || 0,
-        taxAmount: taxSnapshot?.taxAmount ?? 0,
-        taxRatePercentage: taxSnapshot?.taxRatePercentage ?? 0,
-        taxCategory: taxSnapshot?.taxCategory ?? dbProduct.category ?? "General",
-        isTaxInclusive: taxSnapshot?.isTaxInclusive ?? false,
-        commissionRatePercentage: commissionInfo.percentage,
-        commissionAmount: lineCommission,
-        nurseryEarnings: lineNurseryEarnings,
-        nursery: dbProduct.nursery, // 🛡️ Enforce db-authoritative vendor split allocation
-        status: "Processing",
-        commissionAudit: {
-          originalCommission: lineCommission,
-          commissionRate,
-          lineGross,
-          status: "ACTIVE",
-        },
-      });
-    }
-
-    // 🛡️ IDEMPOTENCY CHECK: Multi-submit / replay query interception
-    let activeVerifiedOrder = await Order.findOne({ "paymentInfo.id": paymentInfo.razorpay_payment_id });
-    const lowStockItems: { nurseryId?: string; name: string; stock: number }[] = [];
-
-    // 🔍 5. STOCK RESERVATION STATUS EVALUATION
-    const reservation = await StockReservation.findOne({
-      razorpayOrderId: paymentInfo.razorpay_order_id,
+    const result = await processOrderPlacement({
+      paymentInfo,
+      shippingInfo,
+      orderItems,
+      couponCode,
+      coupon,
+      user: req.user,
+      shippingAddress,
+      pincode,
+      pinCode,
     });
 
-    const isReservationPending =
-      reservation && reservation.status === "PENDING";
-
-    if (!activeVerifiedOrder) {
-      // 🚚 PINCODE SERVICEABILITY VALIDATION ACROSS MULTI-VENDOR ITEMS
-      const rawDestinationPincode =
-        shippingInfo?.pinCode ||
-        shippingInfo?.pincode ||
-        req.body.shippingAddress?.pinCode ||
-        req.body.shippingAddress?.pincode ||
-        req.body.pincode ||
-        req.body.pinCode;
-
-      const destinationPincode = rawDestinationPincode
-        ? String(rawDestinationPincode).trim()
-        : "";
-
-      const uniqueNurseryIds = Array.from(
-        new Set(
-          dbProductsCache
-            .map((entry) => entry.dbProduct.nursery?.toString())
-            .filter((id): id is string => Boolean(id))
-        )
-      );
-
-      if (uniqueNurseryIds.length > 0) {
-        if (!destinationPincode || !/^[1-9][0-9]{5}$/.test(destinationPincode)) {
-          return res.status(400).json({
-            status: "fail",
-            message: "A valid 6-digit shipping pincode is required to verify delivery serviceability.",
-          });
-        }
-
-        const nurseryProfiles = await NurseryProfile.find({
-          nursery: { $in: uniqueNurseryIds },
-        }).lean();
-
-        const profileMap = new Map<string, any>();
-        for (const p of nurseryProfiles) {
-          if (p.nursery) {
-            profileMap.set(p.nursery.toString(), p);
-          }
-        }
-
-        const itemsToCheck = dbProductsCache.map((entry) => ({
-          productId: String(entry.dbProduct._id),
-          productName: entry.dbProduct.name,
-          nurseryId: entry.dbProduct.nursery ? entry.dbProduct.nursery.toString() : null,
-        }));
-
-        const serviceability = await checkCartItemsPincodeServiceability(
-          destinationPincode,
-          itemsToCheck,
-          profileMap
-        );
-
-        if (!serviceability.isServiceable) {
-          return res.status(400).json({
-            status: "fail",
-            message: "Delivery not available for some items at your pincode",
-            unserviceableItems: serviceability.unserviceableItems,
-          });
-        }
-      }
-
-      try {
-        await withTransaction(async (session) => {
-          const updateOpts = session ? { session } : {};
-
-          if (isReservationPending) {
-            // 🔒 PATH A: Active 15-minute reservation held — commit stock deduction atomically
-            const commitRes = await commitStockReservation(
-              paymentInfo.razorpay_order_id,
-              session
-            );
-            if (!commitRes.success && commitRes.status !== "ALREADY_COMMITTED") {
-              throw new Error(
-                `Failed to commit stock reservation for order: ${paymentInfo.razorpay_order_id}`
-              );
-            }
-
-            for (const item of verifiedOrderItems) {
-              const TargetModel = getCaseInsensitiveModel(item.itemModel);
-              if (TargetModel) {
-                const productDoc = await TargetModel.findById(item.item).session(
-                  session || null
-                );
-                if (
-                  productDoc &&
-                  typeof productDoc.stock === "number" &&
-                  productDoc.stock <= 5
-                ) {
-                  lowStockItems.push({
-                    nurseryId: item.nursery?.toString(),
-                    name: productDoc.name || item.name || "Product",
-                    stock: productDoc.stock,
-                  });
-                }
-              }
-            }
-          } else {
-            // ⚠️ PATH B: Reservation was RELEASED (15-min TTL expired) or NOT FOUND!
-            // Customer finalized payment after timeout — attempt on-the-fly inventory deduction
-            let stockAllocationFailed = false;
-            let failedItemDetail: any = null;
-            const successfullyDeducted: Array<{
-              model: any;
-              id: any;
-              quantity: number;
-            }> = [];
-
-            for (const item of verifiedOrderItems) {
-              const TargetModel = getCaseInsensitiveModel(item.itemModel)!;
-              const targetItemId = new mongoose.Types.ObjectId(item.item);
-
-              const updatedInventory = await TargetModel.findOneAndUpdate(
-                {
-                  _id: targetItemId,
-                  isActive: true,
-                  $expr: {
-                    $gte: [
-                      {
-                        $subtract: [
-                          { $ifNull: ["$stock", 0] },
-                          { $ifNull: ["$reservedStock", 0] },
-                        ],
-                      },
-                      Number(item.quantity),
-                    ],
-                  },
-                },
-                { $inc: { stock: -Number(item.quantity) } },
-                { new: true, ...updateOpts }
-              );
-
-              if (!updatedInventory) {
-                stockAllocationFailed = true;
-                failedItemDetail = item;
-                break;
-              }
-
-              successfullyDeducted.push({
-                model: TargetModel,
-                id: targetItemId,
-                quantity: Number(item.quantity),
-              });
-
-              if (
-                typeof updatedInventory.stock === "number" &&
-                updatedInventory.stock <= 5
-              ) {
-                lowStockItems.push({
-                  nurseryId: item.nursery?.toString(),
-                  name: updatedInventory.name || item.name || "Product",
-                  stock: updatedInventory.stock,
-                });
-              }
-            }
-
-            if (stockAllocationFailed) {
-              if (!session) {
-                for (const d of successfullyDeducted) {
-                  await d.model.findByIdAndUpdate(d.id, {
-                    $inc: { stock: d.quantity },
-                  });
-                }
-              }
-              const collisionErr = new Error("STOCK_COLLISION_DEPLETED_POST_TTL");
-              (collisionErr as any).isStockDepletedPostTtl = true;
-              (collisionErr as any).failedItem = failedItemDetail;
-              throw collisionErr;
-            }
-          }
-
-          const createOpts = session ? { session } : {};
-          const [instantOrder] = await Order.create(
-            [
-              {
-                shippingInfo,
-                orderItems: verifiedOrderItems,
-                user: req.user._id,
-                paymentInfo: {
-                  id: paymentInfo.razorpay_payment_id,
-                  orderId: paymentInfo.razorpay_order_id,
-                  status: "captured",
-                },
-                itemsPrice: authoritativeTotals.itemsPrice,
-                taxPrice: authoritativeTotals.taxPrice,
-                shippingPrice: authoritativeTotals.shippingPrice,
-                couponCode: appliedCouponCode || undefined,
-                discountAmount: couponDiscountAmount || 0,
-                totalPrice:
-                  chargedAmountPaise > expectedAmountPaise
-                    ? toRupees(chargedAmountPaise)
-                    : toRupees(expectedAmountPaise),
-                paidAt: new Date(),
-              },
-            ],
-            createOpts
-          );
-          activeVerifiedOrder = instantOrder;
-
-          // 🎟️ Atomically increment coupon usage and record user redemption
-          if (appliedCouponCode && couponDiscountAmount > 0) {
-            await Coupon.updateOne(
-              { code: appliedCouponCode },
-              {
-                $inc: { usedCount: 1 },
-                $addToSet: { usedBy: req.user._id },
-              },
-              updateOpts
-            );
-          }
-
-          // 📒 Write COMMISSION_CHARGED ledger entries for each item inside the same transaction
-          const ledgerEntries = verifiedOrderItems.map((item) => ({
-            nursery: item.nursery,
-            entryType: "COMMISSION_CHARGED" as const,
-            amount: item.commissionAudit?.originalCommission ?? 0,
-            direction: "DEBIT" as const,
-            description: `Commission charged on sale — Order #${instantOrder._id} | ${item.itemModel} ×${item.quantity}`,
-            orderId: instantOrder._id,
-            orderItemId: item._id,
-            metadata: {
-              itemModel: item.itemModel,
-              commissionRate: item.commissionAudit?.commissionRate ?? 0,
-              lineGross: item.commissionAudit?.lineGross ?? 0,
-              quantity: item.quantity,
-            },
-          }));
-          await TransactionLedger.insertMany(ledgerEntries, createOpts);
-        });
-      } catch (err: any) {
-        if (err?.isStockDepletedPostTtl) {
-          // 🚨 Stock oversold/depleted post-TTL! Execute automated Razorpay fallback refund engine
-          const refundResult = await processFallbackRefund({
-            razorpayPaymentId: paymentInfo.razorpay_payment_id,
-            razorpayOrderId: paymentInfo.razorpay_order_id,
-            amountPaise: chargedAmountPaise,
-            userId: req.user?._id,
-            customerEmail: req.user?.email,
-            customerName: req.user?.name,
-            reason: "STOCK_COLLISION_POST_TTL",
-            orderItems: verifiedOrderItems,
-          });
-
-          return res.status(409).json({
-            success: false,
-            refunded: refundResult.success,
-            refundId: refundResult.refundId,
-            message:
-              "Item(s) in your cart were sold out because the 15-minute checkout reservation expired. A 100% full refund has been automatically initiated to your original payment method.",
-          });
-        }
-        throw err;
-      }
+    if (result.status === "EXISTING") {
+      return res.status(201).json({
+        success: true,
+        message: "Payment successfully validated, order pipeline synchronized cleanly.",
+        order: result.order,
+      });
     }
 
-    // Fire-and-forget email notifications
-    if (activeVerifiedOrder) {
-      const oid = activeVerifiedOrder._id.toString();
-      sendOrderConfirmationEmail(oid).catch((e) =>
-        console.error("❌ [Email Trigger Failed] Event: OrderConfirmation, Error:", e?.message || e)
-      );
-      sendAdminNewOrderEmail(
-        oid,
-        activeVerifiedOrder.totalPrice,
-        req.user?.name || "Customer",
-        activeVerifiedOrder.orderItems.length
-      ).catch((e) =>
-        console.error("❌ [Email Trigger Failed] Event: AdminNewOrder, Error:", e?.message || e)
-      );
-
-      // Notify each nursery with their relevant items
-      const nurseryItemsMap = new Map<string, any[]>();
-      for (const item of activeVerifiedOrder.orderItems) {
-        const nid = item.nursery?.toString();
-        if (nid) {
-          if (!nurseryItemsMap.has(nid)) nurseryItemsMap.set(nid, []);
-          nurseryItemsMap.get(nid)!.push(item);
-        }
-      }
-      for (const [nurseryId, items] of nurseryItemsMap) {
-        sendNurseryOrderAlertEmail(
-          nurseryId,
-          oid,
-          items,
-          activeVerifiedOrder.shippingInfo.city,
-          activeVerifiedOrder.shippingInfo.pinCode
-        ).catch((e) =>
-          console.error("❌ [Email Trigger Failed] Event: NurseryOrderAlert, Error:", e?.message || e)
-        );
-      }
-
-      // Non-blocking: Dispatch low stock alerts to nurseries
-      if (lowStockItems.length > 0) {
-        (async () => {
-          for (const lItem of lowStockItems) {
-            if (!lItem.nurseryId) continue;
-            try {
-              const vendor = await User.findById(lItem.nurseryId).select("name email").lean();
-              if (vendor?.email) {
-                sendLowStockAlert(
-                  vendor.email,
-                  (vendor as any).name || "Nursery Owner",
-                  lItem.name,
-                  lItem.stock
-                ).catch((err) =>
-                  console.error("❌ [Email Trigger Failed] Event: LowStockAlert, Error:", err?.message)
-                );
-              }
-            } catch (err: any) {
-              console.error("Error looking up vendor for low stock alert:", err?.message);
-            }
-          }
-        })().catch((err) => console.error("Error in low stock background dispatch:", err));
-      }
+    if (result.status === "UNSERVICEABLE") {
+      return res.status(400).json({
+        status: "fail",
+        message: "Delivery not available for some items at your pincode",
+        unserviceableItems: result.unserviceableItems,
+      });
     }
 
-    res.status(201).json({
+    if (result.status === "COLLISION_REFUNDED") {
+      return res.status(409).json({
+        success: false,
+        refunded: result.refunded,
+        refundId: result.refundId,
+        message: result.message,
+      });
+    }
+
+    return res.status(201).json({
       success: true,
       message: "Payment successfully validated, order pipeline synchronized cleanly.",
-      order: activeVerifiedOrder
+      order: result.order,
     });
   }
 );
-
 // ======================================================================
 // 🔍 2. GET SINGLE ORDER (SECURED WITH STRICT IDOR / BOLA GUARDS)
 // ======================================================================
