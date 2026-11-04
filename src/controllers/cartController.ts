@@ -2,10 +2,186 @@ import { Request, Response, NextFunction } from "express";
 import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import ErrorHandler from "../utils/errorHandler";
 import Cart from "../models/cartModel";
+import User from "../models/userModel";
 import NurseryProfile from "../models/nurseryProfileModel";
 import { findProductAndModel } from "../utils/productRegistry";
-import { ICartDocument } from "../types/cartWishlist.types";
+import {
+  ICartDocument,
+  IEnrichedCart,
+  IEnrichedCartItem,
+  UnavailableReason,
+} from "../types/cartWishlist.types";
 import cacheManager from "../utils/cacheManager";
+
+// ======================================================================
+// 🛡️ DYNAMIC AVAILABILITY ENRICHMENT & VALIDATION HELPERS
+// ======================================================================
+
+/**
+ * 🔍 Enriches cart items with dynamic availability flags without mutating database documents.
+ * Preserves the customer's cart state permanently in MongoDB and never calls cart.save() on read.
+ */
+export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCart> => {
+  const cartObj = cart.toObject ? cart.toObject() : JSON.parse(JSON.stringify(cart));
+  const rawItems = cartObj.items || [];
+
+  if (rawItems.length === 0) {
+    return {
+      ...cartObj,
+      items: [],
+      subtotal: 0,
+      totalAmount: 0,
+      availableItemsCount: 0,
+      unavailableItemsCount: 0,
+    };
+  }
+
+  // 1. Collect unique nursery IDs from cart items
+  const uniqueNurseryIds: string[] = Array.from(
+    new Set(
+      rawItems
+        .map((item: any) => item.nursery?.toString() || item.product?.nursery?.toString())
+        .filter((id: any): id is string => Boolean(id))
+    )
+  );
+
+  // 2. Fetch nursery profiles & user statuses in parallel
+  const [nurseryProfiles, nurseryUsers] = await Promise.all([
+    uniqueNurseryIds.length > 0
+      ? NurseryProfile.find({ nursery: { $in: uniqueNurseryIds as any } })
+          .select("nursery isActive approvalStatus businessName")
+          .lean()
+      : [],
+    uniqueNurseryIds.length > 0
+      ? User.find({ _id: { $in: uniqueNurseryIds as any } })
+          .select("_id isActive isBlocked status")
+          .lean()
+      : [],
+  ]);
+
+  const profileMap = new Map<string, any>();
+  for (const np of nurseryProfiles) {
+    if (np.nursery) {
+      profileMap.set(np.nursery.toString(), np);
+    }
+  }
+
+  const userMap = new Map<string, any>();
+  for (const u of nurseryUsers) {
+    userMap.set(u._id.toString(), u);
+  }
+
+  const isNurseryActive = (nurseryId?: string | null): boolean => {
+    if (!nurseryId) return true; // Direct platform product
+    const profile = profileMap.get(nurseryId);
+    const userDoc = userMap.get(nurseryId);
+
+    if (profile && profile.isActive === false) {
+      return false;
+    }
+
+    if (userDoc) {
+      if (userDoc.isActive === false || userDoc.isBlocked === true) {
+        return false;
+      }
+      if (userDoc.status === "Blocked" || userDoc.status === "Suspended") {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+  // 3. Dynamically evaluate availability and compute subtotal excluding unavailable items
+  let subtotal = 0;
+  let availableItemsCount = 0;
+  let unavailableItemsCount = 0;
+
+  const enrichedItems: IEnrichedCartItem[] = rawItems.map((rawItem: any) => {
+    const product = rawItem.product;
+
+    let isAvailable = true;
+    let unavailableReason: UnavailableReason | undefined = undefined;
+
+    if (!product || product.isActive === false) {
+      isAvailable = false;
+      unavailableReason = "PRODUCT_DISABLED";
+    } else {
+      const nurseryId = rawItem.nursery?.toString() || product.nursery?.toString();
+      if (!isNurseryActive(nurseryId)) {
+        isAvailable = false;
+        unavailableReason = "NURSERY_INACTIVE";
+      } else if (typeof product.stock === "number" && product.stock <= 0) {
+        isAvailable = false;
+        unavailableReason = "OUT_OF_STOCK";
+      }
+    }
+
+    if (isAvailable && product) {
+      const price =
+        product.discountPrice != null && product.discountPrice > 0
+          ? product.discountPrice
+          : (product.price || 0);
+      subtotal += price * (rawItem.quantity || 1);
+      availableItemsCount += rawItem.quantity || 1;
+    } else {
+      unavailableItemsCount += rawItem.quantity || 1;
+    }
+
+    return {
+      ...rawItem,
+      isAvailable,
+      unavailableReason,
+    };
+  });
+
+  return {
+    ...cartObj,
+    items: enrichedItems,
+    subtotal: Math.round(subtotal * 100) / 100,
+    totalAmount: Math.round(subtotal * 100) / 100,
+    availableItemsCount,
+    unavailableItemsCount,
+  };
+};
+
+/**
+ * 🛡️ Helper to validate availability of all items in a user's cart document.
+ * Used during checkout to prevent placing orders with unavailable items.
+ */
+export const checkCartAvailability = async (
+  userId: any
+): Promise<{
+  isValid: boolean;
+  unavailableItems: Array<{
+    productId: string;
+    name: string;
+    reason: UnavailableReason;
+  }>;
+}> => {
+  const cart = await Cart.findOne({ user: userId }).populate({
+    path: "items.product",
+    select: "name price discountPrice stock nursery isActive",
+  });
+
+  if (!cart || !cart.items || cart.items.length === 0) {
+    return { isValid: true, unavailableItems: [] };
+  }
+
+  const enriched = await enrichCartWithAvailability(cart);
+  const unavailableList = enriched.items
+    .filter((it) => it.isAvailable === false)
+    .map((it) => ({
+      productId: String(it.product?._id || it.product || ""),
+      name: it.product?.name || "Product",
+      reason: it.unavailableReason || "PRODUCT_DISABLED",
+    }));
+
+  return {
+    isValid: unavailableList.length === 0,
+    unavailableItems: unavailableList,
+  };
+};
 
 // 🛒 1. ADD OR INCREMENT ITEM IN CART
 export const addToCart = catchAsyncErrors(
@@ -58,10 +234,11 @@ export const addToCart = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery"
+      select: "name price discountPrice images coverImage stock slug nursery isActive category"
     });
 
-    res.status(200).json({ success: true, cart: updatedCart });
+    const enrichedCart = await enrichCartWithAvailability(updatedCart);
+    res.status(200).json({ success: true, cart: enrichedCart });
   }
 );
 
@@ -99,49 +276,31 @@ export const updateCartQuantity = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery"
+      select: "name price discountPrice images coverImage stock slug nursery isActive category"
     });
 
-    res.status(200).json({ success: true, cart: updatedCart });
+    const enrichedCart = await enrichCartWithAvailability(updatedCart);
+    res.status(200).json({ success: true, cart: enrichedCart });
   }
 );
 
-// 🔍 3. GET USER CART (With Active Nursery Filtration)
+// 🔍 3. GET USER CART (Preserving State with Dynamic Availability Flags)
 export const getMyCart = catchAsyncErrors(
   async (req: Request, res: Response, next: NextFunction) => {
     let cart = await Cart.findOne({ user: req.user?._id }).populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery"
+      select: "name price discountPrice images coverImage stock slug nursery isActive category"
     });
 
     if (!cart) {
       cart = await Cart.create({ user: req.user?._id, items: [] });
-    } else if (cart.items.length > 0) {
-      // 🛑 सुरक्षा चेक: उन सभी नर्सरी की लिस्ट निकालें जो Active हैं (Cached for performance)
-      const activeNurseryIds = await cacheManager.getOrSet(
-        "nurseries:active_ids_list",
-        async () => {
-          const activeNurseries = await NurseryProfile.find({ isActive: true }).select("nursery").lean();
-          return activeNurseries.map((n) => n.nursery.toString());
-        },
-        300
-      );
-
-      // सिर्फ उन्हीं आइटम्स को कार्ट में रखें जिनकी नर्सरी एक्टिव है
-      const originalLength = cart.items.length;
-      cart.items = cart.items.filter((item: any) => {
-        // अगर प्रोडक्ट पॉप्युलेट नहीं हुआ (डिलीट हो गया) या उसकी नर्सरी ब्लॉक है, तो हटा दें
-        if (!item.product || !item.product.nursery) return false;
-        return activeNurseryIds.includes(item.product.nursery.toString());
-      }) as any;
-
-      // अगर कोई आइटम फिल्टर होकर कम हुआ है, तो डेटाबेस में कार्ट को अपडेट कर दें
-      if (cart.items.length !== originalLength) {
-        await cart.save();
-      }
     }
 
-    res.status(200).json({ success: true, cart });
+    // 🛡️ Dynamically enrich each item with isAvailable and unavailableReason flags.
+    // Never deletes or removes items from the user's cart document in MongoDB.
+    const enrichedCart = await enrichCartWithAvailability(cart);
+
+    res.status(200).json({ success: true, cart: enrichedCart });
   }
 );
 
@@ -165,10 +324,11 @@ export const removeFromCart = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery"
+      select: "name price discountPrice images coverImage stock slug nursery isActive category"
     });
 
-    res.status(200).json({ success: true, message: "Item removed", cart: updatedCart });
+    const enrichedCart = await enrichCartWithAvailability(updatedCart);
+    res.status(200).json({ success: true, message: "Item removed", cart: enrichedCart });
   }
 );
 
@@ -185,10 +345,6 @@ export const syncCart = catchAsyncErrors(
     let cart = await Cart.findOne({ user: userId }) as ICartDocument | null;
     if (!cart) cart = await Cart.create({ user: userId, items: [] }) as unknown as ICartDocument;
 
-    // सिंक करने से पहले ही सभी एक्टिव नर्सरीज़ की लिस्ट ले लें
-    const activeNurseries = await NurseryProfile.find({ isActive: true }).select("nursery").lean();
-    const activeNurseryIds = activeNurseries.map(n => n.nursery.toString());
-
     for (const guestItem of guestCartItems) {
       const rawId =
         typeof guestItem.product === "object" && guestItem.product !== null
@@ -199,9 +355,6 @@ export const syncCart = catchAsyncErrors(
 
       const { product, modelName } = await findProductAndModel(prodId);
       if (!product || !modelName) continue;
-
-      // 🛑 सुरक्षा चेक: अगर गेस्ट कार्ट का आइटम किसी ब्लॉक नर्सरी का है, तो उसे सिंक मत करो
-      if (!activeNurseryIds.includes(product.nursery.toString())) continue;
 
       const requestedQty = Math.max(1, Number(guestItem.quantity) || 1);
       const itemIndex = cart.items.findIndex(
@@ -227,14 +380,11 @@ export const syncCart = catchAsyncErrors(
     await cart.save();
     const syncedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery"
+      select: "name price discountPrice images coverImage stock slug nursery isActive category"
     });
 
-    if (syncedCart && Array.isArray(syncedCart.items)) {
-      syncedCart.items = syncedCart.items.filter((item: any) => Boolean(item.product)) as any;
-    }
-
-    res.status(200).json({ success: true, cart: syncedCart });
+    const enrichedCart = await enrichCartWithAvailability(syncedCart);
+    res.status(200).json({ success: true, cart: enrichedCart });
   }
 );
 

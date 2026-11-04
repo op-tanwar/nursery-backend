@@ -30,6 +30,30 @@ export interface ICartDocument extends ICart, Document {
   updatedAt: Date;
 }
 
+export type UnavailableReason = "NURSERY_INACTIVE" | "OUT_OF_STOCK" | "PRODUCT_DISABLED";
+
+export interface IEnrichedCartItem {
+  product: any;
+  itemModel: ProductModelType;
+  quantity: number;
+  nursery?: Types.ObjectId | string;
+  isAvailable: boolean;
+  unavailableReason?: UnavailableReason;
+  _id?: any;
+}
+
+export interface IEnrichedCart {
+  _id?: any;
+  user: Types.ObjectId | string;
+  items: IEnrichedCartItem[];
+  subtotal: number;
+  totalAmount: number;
+  availableItemsCount: number;
+  unavailableItemsCount: number;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 // ======================================================================
 // 💚 WISHLIST INTERFACES
 // ======================================================================

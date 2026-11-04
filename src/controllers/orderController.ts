@@ -29,6 +29,7 @@ import User from "../models/userModel";
 import NurseryProfile from "../models/nurseryProfileModel";
 import Coupon from "../models/couponModel";
 import { verifyCouponInternal } from "./couponController";
+import { checkCartAvailability } from "./cartController";
 import {
   getCommissionRate,
   calcLineGross,
@@ -74,6 +75,20 @@ export const createNewOrder = catchAsyncErrors(
 
     if (!orderItems || !Array.isArray(orderItems) || orderItems.length === 0) {
       return next(new ErrorHandler("Order items list is empty or invalid.", 400));
+    }
+
+    // 🛡️ CHECKOUT GUARD: Ensure customer's cart does not contain unavailable items
+    if (req.user?._id) {
+      const cartCheck = await checkCartAvailability(req.user._id);
+      if (!cartCheck.isValid) {
+        const itemNames = cartCheck.unavailableItems.map((u) => `"${u.name}"`).join(", ");
+        return next(
+          new ErrorHandler(
+            `Your cart contains unavailable item(s): ${itemNames}. Please remove or save these items for later before placing an order.`,
+            400
+          )
+        );
+      }
     }
 
     if (!process.env.RAZORPAY_KEY_SECRET) {
