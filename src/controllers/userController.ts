@@ -39,6 +39,11 @@ export const registerUser = catchAsyncErrors(
       return next(new ErrorHandler("Missing or invalid required fields", 400));
     }
 
+    const cleanName = name.trim();
+    if (cleanName.length < 2 || cleanName.length > 70) {
+      return next(new ErrorHandler("Name must be between 2 and 70 characters", 400));
+    }
+
     const cleanEmail = email.trim().toLowerCase();
     if (!validator.isEmail(cleanEmail)) {
       return next(new ErrorHandler("Please provide a valid email address", 400));
@@ -50,7 +55,7 @@ export const registerUser = catchAsyncErrors(
     }
 
     const user = await User.create({
-      name: name.trim(),
+      name: cleanName,
       email: cleanEmail,
       password,
       role: "user",
@@ -360,9 +365,9 @@ export const updateProfile = catchAsyncErrors(
     // 1. Update Safe Profile Fields (Name)
     if (req.body.name && typeof req.body.name === "string") {
       const cleanName = req.body.name.trim();
-      if (cleanName.length < 2 || cleanName.length > 50) {
+      if (cleanName.length < 2 || cleanName.length > 70) {
         return next(
-          new ErrorHandler("Name must be between 2 and 50 characters", 400)
+          new ErrorHandler("Name must be between 2 and 70 characters", 400)
         );
       }
       user.name = cleanName;

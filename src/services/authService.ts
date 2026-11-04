@@ -198,8 +198,16 @@ export async function authenticateSocialUser(
     }
   } else {
     // Create brand new user via Google OAuth with strictly validated public role
+    let oauthName = (profile.name || profile.email.split("@")[0] || "User").trim();
+    if (oauthName.length < 2) {
+      oauthName = `${oauthName} User`;
+    }
+    if (oauthName.length > 70) {
+      oauthName = oauthName.substring(0, 70).trim();
+    }
+
     user = await User.create({
-      name: profile.name,
+      name: oauthName,
       email: profile.email,
       authProvider: "google",
       googleId: profile.providerId,
