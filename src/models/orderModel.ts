@@ -68,7 +68,18 @@ const orderSchema = new Schema<IOrder>(
             default: "Pending"
           },
           claimedAt: { type: Date }
-        }
+        },
+        refundDetails: {
+          refundId: { type: String, trim: true },
+          refundStatus: {
+            type: String,
+            enum: ["PENDING", "PROCESSED", "FAILED", "PENDING_MANUAL_REVIEW"],
+          },
+          refundAmount: { type: Number, default: 0 },
+          refundedAt: { type: Date },
+          reason: { type: String, trim: true },
+          failureReason: { type: String, trim: true },
+        },
       },
     ],
 
@@ -94,6 +105,17 @@ const orderSchema = new Schema<IOrder>(
       required: true,
       default: "Processing",
       enum: ["Processing", "Shipped", "Out for Delivery", "Delivered", "Cancelled"],
+    },
+    refundDetails: {
+      refundId: { type: String, trim: true },
+      refundStatus: {
+        type: String,
+        enum: ["PENDING", "PROCESSED", "FAILED", "PENDING_MANUAL_REVIEW"],
+      },
+      refundAmount: { type: Number, default: 0 },
+      refundedAt: { type: Date },
+      reason: { type: String, trim: true },
+      failureReason: { type: String, trim: true },
     },
     paidAt: { type: Date, required: true, default: Date.now },
     deliveredAt: Date,

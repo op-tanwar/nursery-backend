@@ -758,6 +758,124 @@ export const getMyNurseryOrders = catchAsyncErrors(async (req: Request, res: Res
   });
 });
 
+interface ProcessOrderRefundParams {
+  order: any;
+  amountRupees: number;
+  reason: string;
+  notes?: Record<string, string>;
+}
+
+interface ProcessOrderRefundResult {
+  success: boolean;
+  refundId?: string;
+  refundAmount: number;
+  refundStatus: "PROCESSED" | "FAILED" | "PENDING_MANUAL_REVIEW";
+  failureReason?: string;
+  isOnlinePayment: boolean;
+  skipped: boolean;
+}
+
+/**
+ * 💸 Helper to securely process automated Razorpay refund for cancelled orders or items.
+ * Enforces idempotency, paise conversion, double-refund prevention, and graceful manual review fallback.
+ */
+const processOrderRefund = async (
+  params: ProcessOrderRefundParams
+): Promise<ProcessOrderRefundResult> => {
+  const { order, reason, notes = {} } = params;
+  const paymentId = order.paymentInfo?.id;
+  const isOnlinePayment = Boolean(
+    paymentId &&
+    typeof paymentId === "string" &&
+    paymentId.startsWith("pay_")
+  );
+
+  // 1. Calculate previously processed refunds across items and order to prevent double-refunding
+  const previouslyRefunded =
+    (order.orderItems || []).reduce((acc: number, it: any) => {
+      if (it.refundDetails?.refundStatus === "PROCESSED") {
+        return acc + (Number(it.refundDetails.refundAmount) || 0);
+      }
+      return acc;
+    }, 0) +
+    (order.refundDetails?.refundStatus === "PROCESSED"
+      ? Number(order.refundDetails.refundAmount) || 0
+      : 0);
+
+  const remainingRefundable = roundMoney(
+    Math.max(0, (order.totalPrice || 0) - previouslyRefunded)
+  );
+  const actualRefundRupees = roundMoney(
+    Math.min(params.amountRupees, remainingRefundable)
+  );
+
+  if (actualRefundRupees <= 0) {
+    return {
+      success: true,
+      refundAmount: 0,
+      refundStatus: "PROCESSED",
+      isOnlinePayment,
+      skipped: true,
+    };
+  }
+
+  // If not an online payment via Razorpay, mark as processed without calling gateway
+  if (!isOnlinePayment) {
+    return {
+      success: true,
+      refundAmount: actualRefundRupees,
+      refundStatus: "PROCESSED",
+      isOnlinePayment: false,
+      skipped: false,
+    };
+  }
+
+  const amountPaise = toPaise(actualRefundRupees);
+
+  try {
+    const razorpay = getRazorpayInstance();
+    const safeReason = (reason || "Order Cancellation").substring(0, 250);
+
+    const safeNotes: Record<string, string> = {
+      orderId: order._id.toString(),
+      reason: safeReason,
+    };
+
+    for (const [k, v] of Object.entries(notes)) {
+      if (v) safeNotes[k] = String(v).substring(0, 250);
+    }
+
+    const refund = await razorpay.payments.refund(paymentId, {
+      amount: amountPaise,
+      speed: "normal",
+      notes: safeNotes,
+    });
+
+    return {
+      success: true,
+      refundId: refund.id,
+      refundAmount: actualRefundRupees,
+      refundStatus: "PROCESSED",
+      isOnlinePayment: true,
+      skipped: false,
+    };
+  } catch (error: any) {
+    console.error(
+      `🚨 [OrderRefund] Razorpay refund failed for Order #${order._id} (Payment: ${paymentId}):`,
+      error.message || error
+    );
+
+    return {
+      success: false,
+      refundAmount: actualRefundRupees,
+      refundStatus: "PENDING_MANUAL_REVIEW",
+      failureReason: error.message || "Gateway refund API call failed",
+      isOnlinePayment: true,
+      skipped: false,
+    };
+  }
+};
+
 // ======================================================================
 // 🛡️ 6. ADMIN — UPDATE STATUS & DYNAMIC STOCK REVERT
 // ======================================================================
@@ -788,6 +906,7 @@ export const updateOrderAdmin = catchAsyncErrors(
 
       if (normalizedStatus === "Cancelled") {
         const ledgerEntries: any[] = [];
+        const newlyCancelledItems: any[] = [];
 
         for (const item of order.orderItems) {
           // 🛡️ IDEMPOTENCY GUARD: Skip items already cancelled — never reverse commission twice
@@ -807,17 +926,19 @@ export const updateOrderAdmin = catchAsyncErrors(
           // 💰 Calculate reversal amount using centralized paise-safe math
           const lineGross = calcLineGross(item.price, item.quantity);
           const commissionToReverse = calcLineCommission(lineGross, item.itemModel);
+          const commRate = await getCommissionRate(item.itemModel);
 
           // Mark commissionAudit as reversed
           item.commissionAudit = {
             originalCommission: (item.commissionAudit as any)?.originalCommission ?? commissionToReverse,
-            commissionRate: await getCommissionRate(item.itemModel),
+            commissionRate: commRate,
             lineGross,
             status: "CANCELLED_COMMISSION_REVERSED",
             reversedAt: new Date(),
           };
 
           item.status = "Cancelled";
+          newlyCancelledItems.push(item);
 
           // 📒 Queue a COMMISSION_REVERSED ledger entry (CREDIT back to nursery)
           if (item.nursery) {
@@ -831,12 +952,60 @@ export const updateOrderAdmin = catchAsyncErrors(
               orderItemId: item._id,
               metadata: {
                 itemModel: item.itemModel,
-                commissionRate: getCommissionRate(item.itemModel),
+                commissionRate: commRate,
                 lineGross,
                 quantity: item.quantity,
               },
             });
           }
+        }
+
+        // 💸 AUTOMATED CUSTOMER REFUND: Full order cancellation
+        const cancellationReason = req.body.reason || req.body.cancellationReason || "Admin Order Cancellation";
+        const refundResult = await processOrderRefund({
+          order,
+          amountRupees: order.totalPrice,
+          reason: cancellationReason,
+        });
+
+        order.refundDetails = {
+          refundId: refundResult.refundId,
+          refundStatus: refundResult.refundStatus,
+          refundAmount: refundResult.refundAmount,
+          refundedAt: refundResult.success ? new Date() : undefined,
+          reason: cancellationReason,
+          failureReason: refundResult.failureReason,
+        };
+
+        // Record item-level refund details for newly cancelled items
+        for (const item of newlyCancelledItems) {
+          if (item.refundDetails?.refundStatus !== "PROCESSED") {
+            const itemTotal = roundMoney(calcLineGross(item.price, item.quantity) + (item.taxAmount || 0));
+            item.refundDetails = {
+              refundId: refundResult.refundId,
+              refundStatus: refundResult.refundStatus,
+              refundAmount: itemTotal,
+              refundedAt: refundResult.success ? new Date() : undefined,
+              reason: cancellationReason,
+              failureReason: refundResult.failureReason,
+            };
+          }
+        }
+
+        if (refundResult.success && !refundResult.skipped && refundResult.refundAmount > 0) {
+          ledgerEntries.push({
+            entryType: "CUSTOMER_REFUND",
+            amount: refundResult.refundAmount,
+            direction: "DEBIT",
+            description: `Automated customer refund (${refundResult.refundId || "N/A"}) for Order #${order._id} cancellation`,
+            orderId: order._id,
+            metadata: {
+              refundId: refundResult.refundId,
+              paymentId: order.paymentInfo?.id,
+              refundAmountRupees: refundResult.refundAmount,
+              reason: "ADMIN_FULL_ORDER_CANCELLATION",
+            },
+          });
         }
 
         // Write all ledger entries atomically
@@ -923,6 +1092,8 @@ export const updateOrderNursery = catchAsyncErrors(
 
       const currentNurseryId = req.user?._id.toString();
       const ledgerEntries: any[] = [];
+      const nurseryCancelledItems: any[] = [];
+      let nurseryCancelledItemsTotal = 0;
 
       for (const item of order.orderItems) {
         if (item.nursery?.toString() === currentNurseryId) {
@@ -951,6 +1122,10 @@ export const updateOrderNursery = catchAsyncErrors(
               reversedAt: new Date(),
             };
 
+            const itemLineTotal = roundMoney(lineGross + (item.taxAmount || 0));
+            nurseryCancelledItemsTotal = roundMoney(nurseryCancelledItemsTotal + itemLineTotal);
+            nurseryCancelledItems.push(item);
+
             ledgerEntries.push({
               nursery: item.nursery,
               entryType: "COMMISSION_REVERSED",
@@ -975,6 +1150,68 @@ export const updateOrderNursery = catchAsyncErrors(
 
       if (!updated) {
         throw new ErrorHandler("Unauthorized multi-vendor action", 403);
+      }
+
+      // 💸 AUTOMATED CUSTOMER REFUND: Partial nursery item cancellation
+      if (status === "Cancelled" && nurseryCancelledItems.length > 0) {
+        // Check if all items in the order are now cancelled
+        const allItemsNowCancelled = order.orderItems.every((it) => it.status === "Cancelled");
+
+        // If all items in the order become cancelled, include any unrefunded shipping
+        let totalToRefund = nurseryCancelledItemsTotal;
+        if (allItemsNowCancelled && order.shippingPrice > 0) {
+          totalToRefund = roundMoney(totalToRefund + order.shippingPrice);
+        }
+
+        const cancelReason = reason || cancellationReason || "Nursery Item Cancellation";
+        const refundResult = await processOrderRefund({
+          order,
+          amountRupees: totalToRefund,
+          reason: cancelReason,
+          notes: {
+            nurseryId: currentNurseryId || "",
+          },
+        });
+
+        // Set refundDetails for each cancelled item
+        for (const it of nurseryCancelledItems) {
+          const itemPortion = roundMoney(calcLineGross(it.price, it.quantity) + (it.taxAmount || 0));
+          it.refundDetails = {
+            refundId: refundResult.refundId,
+            refundStatus: refundResult.refundStatus,
+            refundAmount: itemPortion,
+            refundedAt: refundResult.success ? new Date() : undefined,
+            reason: cancelReason,
+            failureReason: refundResult.failureReason,
+          };
+        }
+
+        if (allItemsNowCancelled) {
+          order.refundDetails = {
+            refundId: refundResult.refundId,
+            refundStatus: refundResult.refundStatus,
+            refundAmount: refundResult.refundAmount,
+            refundedAt: refundResult.success ? new Date() : undefined,
+            reason: cancelReason,
+            failureReason: refundResult.failureReason,
+          };
+        }
+
+        if (refundResult.success && !refundResult.skipped && refundResult.refundAmount > 0) {
+          ledgerEntries.push({
+            entryType: "CUSTOMER_REFUND",
+            amount: refundResult.refundAmount,
+            direction: "DEBIT",
+            description: `Partial customer refund (${refundResult.refundId || "N/A"}) on nursery cancellation — Order #${order._id}`,
+            orderId: order._id,
+            metadata: {
+              refundId: refundResult.refundId,
+              paymentId: order.paymentInfo?.id,
+              refundAmountRupees: refundResult.refundAmount,
+              reason: "NURSERY_ITEM_CANCELLED",
+            },
+          });
+        }
       }
 
       if (ledgerEntries.length > 0) {
@@ -1063,6 +1300,13 @@ export const deleteOrder = catchAsyncErrors(
             }
           }
         }
+
+        // 💸 Automated refund if deleted while active and paid online
+        await processOrderRefund({
+          order,
+          amountRupees: order.totalPrice,
+          reason: "Order Deleted by Administrator",
+        });
       }
 
       const deleteOpts = session ? { session } : {};

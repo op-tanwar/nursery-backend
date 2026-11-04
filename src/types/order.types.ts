@@ -31,6 +31,15 @@ export interface IItemClaim {
   claimedAt: Date;
 }
 
+export interface IRefundDetails {
+  refundId?: string;
+  refundStatus?: "PENDING" | "PROCESSED" | "FAILED" | "PENDING_MANUAL_REVIEW";
+  refundAmount?: number;
+  refundedAt?: Date;
+  reason?: string;
+  failureReason?: string;
+}
+
 export interface IOrderItem {
   itemModel:
   | "Plant"
@@ -58,6 +67,7 @@ export interface IOrderItem {
   status: "Processing" | "Shipped" | "Out for Delivery" | "Delivered" | "Cancelled" | "Claimed";
   claim?: IItemClaim;
   commissionAudit?: ICommissionAudit;
+  refundDetails?: IRefundDetails;
   _id?: Types.ObjectId;
 }
 
@@ -88,6 +98,7 @@ export interface IOrder extends Document {
   shippingPrice: number;
   totalPrice: number;
   orderStatus: "Processing" | "Shipped" | "Out for Delivery" | "Delivered" | "Cancelled";
+  refundDetails?: IRefundDetails;
   paidAt: Date;
   deliveredAt?: Date;
   createdAt: Date;
