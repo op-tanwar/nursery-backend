@@ -97,6 +97,8 @@ mainRouter.use("/dashboard", dashboardRoutes);
 
 // 🎟️ Promotional Coupons, Discounts & Seasonal Offers Management
 mainRouter.use("/promotions", couponRoutes);
+mainRouter.use("/coupon", couponRoutes);
+mainRouter.use("/coupons", couponRoutes);
 
 // 📦 Bulk & Corporate Greenery Orders (B2B Request Engine)
 mainRouter.use("/bulk-orders", bulkOrderRoutes);

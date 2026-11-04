@@ -27,6 +27,8 @@ import {
 import { sendLowStockAlert } from "../templates/emails";
 import User from "../models/userModel";
 import NurseryProfile from "../models/nurseryProfileModel";
+import Coupon from "../models/couponModel";
+import { verifyCouponInternal } from "./couponController";
 import {
   getCommissionRate,
   calcLineGross,
@@ -60,7 +62,7 @@ export const createNewOrder = catchAsyncErrors(
       razorpay_payment_id: req.body.razorpay_payment_id,
       razorpay_signature: req.body.razorpay_signature,
     };
-    const { shippingInfo, orderItems } = req.body;
+    const { shippingInfo, orderItems, couponCode, coupon } = req.body;
 
     if (!paymentInfo || !paymentInfo.razorpay_order_id || !paymentInfo.razorpay_payment_id || !paymentInfo.razorpay_signature) {
       return next(new ErrorHandler("Payment details (order_id, payment_id, signature) are incomplete or missing", 400));
@@ -148,17 +150,39 @@ export const createNewOrder = catchAsyncErrors(
     // 🛡️ Strictly calculate metrics server-side, discarding raw input parameters
     const authoritativeTotals = calculateAuthoritativeTotals(authoritativePriceItems, taxMap);
 
+    // 🎟️ Authoritative Coupon Validation
+    const rawCoupon = couponCode || coupon || rzpOrder.notes?.couponCode;
+    let appliedCouponCode: string | undefined;
+    let couponDiscountAmount = 0;
+
+    if (rawCoupon && typeof rawCoupon === "string" && rawCoupon.trim()) {
+      try {
+        const verifiedCoupon = await verifyCouponInternal(
+          rawCoupon,
+          authoritativeTotals.itemsPrice,
+          req.user?._id
+        );
+        appliedCouponCode = verifiedCoupon.couponCode;
+        couponDiscountAmount = verifiedCoupon.discountAmount;
+      } catch (couponErr: any) {
+        console.error("🚨 [Coupon Verification Failed in createNewOrder]:", couponErr.message || couponErr);
+        return next(couponErr);
+      }
+    }
+
+    const couponDiscountPaise = toPaise(couponDiscountAmount);
+    const expectedAmountPaise = Math.max(100, Math.round(authoritativeTotals.totalPricePaise - couponDiscountPaise));
+
     // ⚡ Cross check Gateway charged amount with authoritative catalog total
     const chargedAmountPaise = Number(rzpOrder.amount);
-    const expectedAmountPaise = authoritativeTotals.totalPricePaise;
 
     if (chargedAmountPaise < expectedAmountPaise) {
       console.error(
-        `🚨 [Security Alert] Underpayment detected! Catalog requires ₹${authoritativeTotals.totalPrice} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise). User: ${req.user?._id}`
+        `🚨 [Security Alert] Underpayment detected! Catalog & Coupon require ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise). User: ${req.user?._id}`
       );
       return next(
         new ErrorHandler(
-          `Payment amount mismatch! Expected ₹${authoritativeTotals.totalPrice} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise).`,
+          `Payment amount mismatch! Expected ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise).`,
           400
         )
       );
@@ -166,7 +190,7 @@ export const createNewOrder = catchAsyncErrors(
 
     if (chargedAmountPaise > expectedAmountPaise) {
       console.warn(
-        `⚠️ [Payment Audit] Gateway charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise) while current catalog total is ₹${authoritativeTotals.totalPrice} (${expectedAmountPaise} paise). Permitting order confirmation to preserve customer funds.`
+        `⚠️ [Payment Audit] Gateway charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise) while current catalog total is ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise). Permitting order confirmation to preserve customer funds.`
       );
     }
 
@@ -346,16 +370,30 @@ export const createNewOrder = catchAsyncErrors(
                 itemsPrice: authoritativeTotals.itemsPrice,
                 taxPrice: authoritativeTotals.taxPrice,
                 shippingPrice: authoritativeTotals.shippingPrice,
+                couponCode: appliedCouponCode || undefined,
+                discountAmount: couponDiscountAmount || 0,
                 totalPrice:
-                  chargedAmountPaise > authoritativeTotals.totalPricePaise
+                  chargedAmountPaise > expectedAmountPaise
                     ? toRupees(chargedAmountPaise)
-                    : authoritativeTotals.totalPrice,
+                    : toRupees(expectedAmountPaise),
                 paidAt: new Date(),
               },
             ],
             createOpts
           );
           activeVerifiedOrder = instantOrder;
+
+          // 🎟️ Atomically increment coupon usage and record user redemption
+          if (appliedCouponCode && couponDiscountAmount > 0) {
+            await Coupon.updateOne(
+              { code: appliedCouponCode },
+              {
+                $inc: { usedCount: 1 },
+                $addToSet: { usedBy: req.user._id },
+              },
+              updateOpts
+            );
+          }
 
           // 📒 Write COMMISSION_CHARGED ledger entries for each item inside the same transaction
           const ledgerEntries = verifiedOrderItems.map((item) => ({

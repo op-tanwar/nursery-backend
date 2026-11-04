@@ -5,17 +5,25 @@ export interface ICoupon extends Document {
   discountType: "flat" | "percentage";
   discountValue: number;
   minCartValue: number;
+  maxDiscountAmount?: number;
+  usageLimit?: number;
+  usedCount: number;
   expiryDate: Date;
   isActive: boolean;
   usedBy: mongoose.Types.ObjectId[];
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 const couponSchema = new Schema<ICoupon>(
   {
     code: { type: String, required: true, unique: true, uppercase: true, trim: true },
     discountType: { type: String, enum: ["flat", "percentage"], required: true },
-    discountValue: { type: Number, required: true },
-    minCartValue: { type: Number, default: 0 },
+    discountValue: { type: Number, required: true, min: 0 },
+    minCartValue: { type: Number, default: 0, min: 0 },
+    maxDiscountAmount: { type: Number, default: undefined },
+    usageLimit: { type: Number, default: undefined },
+    usedCount: { type: Number, default: 0, min: 0 },
     expiryDate: { type: Date, required: true },
     isActive: { type: Boolean, default: true },
     // NOTE: Keep usedBy tracked via single array vectors since coupon reuse limits typically apply strictly per individual context.

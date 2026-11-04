@@ -96,6 +96,8 @@ export interface IOrder extends Document {
   itemsPrice: number;
   taxPrice: number;
   shippingPrice: number;
+  couponCode?: string;
+  discountAmount?: number;
   totalPrice: number;
   orderStatus: "Processing" | "Shipped" | "Out for Delivery" | "Delivered" | "Cancelled";
   refundDetails?: IRefundDetails;

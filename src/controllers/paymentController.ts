@@ -45,6 +45,8 @@ import { getActiveTaxMap } from "../utils/taxService";
 import { getEffectiveCommission } from "../utils/commissionService";
 import User from "../models/userModel";
 import NurseryProfile from "../models/nurseryProfileModel";
+import Coupon from "../models/couponModel";
+import { verifyCouponInternal } from "./couponController";
 
 interface AuthenticatedRequest extends Request {
   rawBody?: string;
@@ -58,7 +60,7 @@ export { getRazorpayInstance };
 // ======================================================================
 export const createRazorpayOrder = catchAsyncErrors(
   async (req: any, res: Response, next: NextFunction) => {
-    const { orderItems } = req.body;
+    const { orderItems, couponCode, coupon } = req.body;
 
     if (!orderItems || !Array.isArray(orderItems) || orderItems.length === 0) {
       return next(new ErrorHandler("Order items validation sequence mapping failed. Items array required.", 400));
@@ -134,7 +136,30 @@ export const createRazorpayOrder = catchAsyncErrors(
     // 🛡️ 2. PAISE-LEVEL ZERO-FLOAT AUTHORITATIVE TOTALS WITH DYNAMIC GST
     const totals = calculateAuthoritativeTotals(authoritativeItems, taxMap);
 
-    if (totals.totalPricePaise <= 0) {
+    // 🎟️ 2a. SERVER-SIDE COUPON VALIDATION & DYNAMIC DISCOUNT CALCULATION
+    const rawCoupon = couponCode || coupon;
+    let appliedCouponCode: string | undefined;
+    let couponDiscountAmount = 0;
+
+    if (rawCoupon && typeof rawCoupon === "string" && rawCoupon.trim()) {
+      try {
+        const verifiedCoupon = await verifyCouponInternal(
+          rawCoupon,
+          totals.itemsPrice,
+          req.user?._id
+        );
+        appliedCouponCode = verifiedCoupon.couponCode;
+        couponDiscountAmount = verifiedCoupon.discountAmount;
+      } catch (couponErr: any) {
+        return next(couponErr);
+      }
+    }
+
+    const couponDiscountPaise = toPaise(couponDiscountAmount);
+    // Final payable in paise: ensure minimum 100 paise (₹1) to satisfy Razorpay gateway requirement
+    const finalTotalPaise = Math.max(100, Math.round(totals.totalPricePaise - couponDiscountPaise));
+
+    if (finalTotalPaise <= 0) {
       return next(new ErrorHandler("Computed transaction checkout value must be greater than zero.", 400));
     }
 
@@ -168,7 +193,7 @@ export const createRazorpayOrder = catchAsyncErrors(
     const safeShippingPin = String(req.body.shippingInfo?.pinCode || "").substring(0, 10);
 
     const options = {
-      amount: totals.totalPricePaise, // Accurate to smallest currency unit (Paise)
+      amount: finalTotalPaise, // Accurate to smallest currency unit (Paise) with coupon applied
       currency: "INR",
       receipt: `rcpt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       notes: {
@@ -179,6 +204,8 @@ export const createRazorpayOrder = catchAsyncErrors(
         shippingCity: safeShippingCity,
         shippingPinCode: safeShippingPin,
         itemCount: String(authoritativeItems.length),
+        couponCode: appliedCouponCode ? appliedCouponCode.substring(0, 30) : "",
+        couponDiscount: couponDiscountAmount > 0 ? String(couponDiscountAmount).substring(0, 30) : "0",
       },
     };
 
@@ -220,10 +247,12 @@ export const createRazorpayOrder = catchAsyncErrors(
       calculation: {
         originalItemsPrice: totals.originalItemsPrice,
         discountAmount: totals.discountAmount,
+        couponCode: appliedCouponCode,
+        couponDiscountAmount,
         itemsPrice: totals.itemsPrice,
         shippingPrice: totals.shippingPrice,
         taxPrice: totals.taxPrice,
-        totalPrice: totals.totalPrice,
+        totalPrice: toRupees(finalTotalPaise),
         categoryTaxBreakdown: totals.categoryTaxBreakdown,
       },
     });
@@ -240,7 +269,7 @@ export const verifyPayment = catchAsyncErrors(
       razorpay_payment_id: req.body.razorpay_payment_id,
       razorpay_signature: req.body.razorpay_signature,
     };
-    const { shippingInfo, orderItems } = req.body;
+    const { shippingInfo, orderItems, couponCode, coupon } = req.body;
 
     if (!paymentInfo || !paymentInfo.razorpay_order_id || !paymentInfo.razorpay_payment_id || !paymentInfo.razorpay_signature) {
       return next(new ErrorHandler("Cryptographic payment credentials (order_id, payment_id, signature) are required.", 400));
@@ -320,18 +349,40 @@ export const verifyPayment = catchAsyncErrors(
 
     const authoritativeTotals = calculateAuthoritativeTotals(authoritativePriceItems, taxMap);
 
+    // 🎟️ Re-verify coupon server-side authoritatively
+    const rawCoupon = couponCode || coupon || rzpOrder.notes?.couponCode;
+    let appliedCouponCode: string | undefined;
+    let couponDiscountAmount = 0;
+
+    if (rawCoupon && typeof rawCoupon === "string" && rawCoupon.trim()) {
+      try {
+        const verifiedCoupon = await verifyCouponInternal(
+          rawCoupon,
+          authoritativeTotals.itemsPrice,
+          req.user?._id
+        );
+        appliedCouponCode = verifiedCoupon.couponCode;
+        couponDiscountAmount = verifiedCoupon.discountAmount;
+      } catch (couponErr: any) {
+        console.error("🚨 [Coupon Verification Failed in verifyPayment]:", couponErr.message || couponErr);
+        return next(couponErr);
+      }
+    }
+
+    const couponDiscountPaise = toPaise(couponDiscountAmount);
+    const expectedAmountPaise = Math.max(100, Math.round(authoritativeTotals.totalPricePaise - couponDiscountPaise));
+
     // ⚡ INTERCEPT AMOUNT MANIPULATION: Cross check Razorpay charged amount with catalog truth
     const chargedAmountPaise = Number(rzpOrder.amount);
-    const expectedAmountPaise = authoritativeTotals.totalPricePaise;
 
     // Strict guard against malicious underpayment (e.g. client tampering with checkout amounts)
     if (chargedAmountPaise < expectedAmountPaise) {
       console.error(
-        `🚨 [Security Alert] Underpayment detected! Catalog requires ₹${authoritativeTotals.totalPrice} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise). User: ${req.user?._id}`
+        `🚨 [Security Alert] Underpayment detected! Catalog & Coupon require ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise). User: ${req.user?._id}`
       );
       return next(
         new ErrorHandler(
-          `Payment amount mismatch! Expected ₹${authoritativeTotals.totalPrice} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise).`,
+          `Payment amount mismatch! Expected ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise), but gateway was charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise).`,
           400
         )
       );
@@ -340,7 +391,7 @@ export const verifyPayment = catchAsyncErrors(
     // Graceful audit log if gateway was charged more (e.g., transition fallback or legacy order)
     if (chargedAmountPaise > expectedAmountPaise) {
       console.warn(
-        `⚠️ [Payment Audit] Gateway charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise) while current catalog total is ₹${authoritativeTotals.totalPrice} (${expectedAmountPaise} paise). Permitting order verification to preserve customer funds.`
+        `⚠️ [Payment Audit] Gateway charged ₹${chargedAmountPaise / 100} (${chargedAmountPaise} paise) while current catalog total with coupon is ₹${toRupees(expectedAmountPaise)} (${expectedAmountPaise} paise). Permitting order verification to preserve customer funds.`
       );
     }
 
@@ -527,10 +578,12 @@ export const verifyPayment = catchAsyncErrors(
               itemsPrice: authoritativeTotals.itemsPrice,
               taxPrice: authoritativeTotals.taxPrice,
               shippingPrice: authoritativeTotals.shippingPrice,
+              couponCode: appliedCouponCode || undefined,
+              discountAmount: couponDiscountAmount || 0,
               totalPrice:
-                chargedAmountPaise > authoritativeTotals.totalPricePaise
+                chargedAmountPaise > expectedAmountPaise
                   ? toRupees(chargedAmountPaise)
-                  : authoritativeTotals.totalPrice,
+                  : toRupees(expectedAmountPaise),
               paidAt: new Date(),
             },
           ],
@@ -538,6 +591,18 @@ export const verifyPayment = catchAsyncErrors(
         );
 
         savedOrder = newOrder;
+
+        // 🎟️ Atomically increment coupon usage and record user redemption
+        if (appliedCouponCode && couponDiscountAmount > 0) {
+          await Coupon.updateOne(
+            { code: appliedCouponCode },
+            {
+              $inc: { usedCount: 1 },
+              $addToSet: { usedBy: req.user._id },
+            },
+            updateOpts
+          );
+        }
 
         // 📒 Ledger accounting entries for multi-vendor commissions
         const ledgerEntries = verifiedOrderItems.map((item) => ({
