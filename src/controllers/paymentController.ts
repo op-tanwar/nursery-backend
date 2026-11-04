@@ -1282,19 +1282,125 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
 // ======================================================================
 export const cancelRazorpayOrder = catchAsyncErrors(
   async (req: any, res: Response, next: NextFunction) => {
-    const { razorpayOrderId } = req.body;
+    const razorpayOrderId =
+      req.body.razorpayOrderId ||
+      req.body.orderId ||
+      req.body.draftOrderId;
 
     if (!razorpayOrderId) {
-      return next(new ErrorHandler("Razorpay Order ID is required to cancel reservation.", 400));
+      return next(
+        new ErrorHandler(
+          "Order reference (razorpayOrderId, orderId, or draftOrderId) is required to cancel reservation.",
+          400
+        )
+      );
     }
 
-    const result = await releaseStockReservation(razorpayOrderId, "USER_CANCELLED");
+    // 1. Locate the stock reservation
+    const reservation = await StockReservation.findOne({
+      $or: [
+        { razorpayOrderId },
+        { _id: mongoose.isValidObjectId(razorpayOrderId) ? razorpayOrderId : null },
+      ].filter(Boolean),
+    });
+
+    if (!reservation) {
+      // Check if an existing order document exists for this reference
+      const existingOrder = await Order.findOne({
+        $or: [
+          { "paymentInfo.razorpay_order_id": razorpayOrderId },
+          { "paymentInfo.id": razorpayOrderId },
+          { _id: mongoose.isValidObjectId(razorpayOrderId) ? razorpayOrderId : null },
+        ].filter(Boolean),
+      });
+
+      if (existingOrder) {
+        const sessionUserId = req.user?._id?.toString();
+        if (
+          sessionUserId &&
+          existingOrder.user?.toString() !== sessionUserId &&
+          req.user?.role !== "admin"
+        ) {
+          return next(new ErrorHandler("You are not authorized to cancel this order.", 403));
+        }
+
+        if (existingOrder.orderStatus === "Processing") {
+          existingOrder.orderStatus = "Cancelled";
+          await existingOrder.save();
+        }
+
+        return res.status(200).json({
+          success: true,
+          released: true,
+          orderStatus: existingOrder.orderStatus,
+          message: "Order cancelled successfully.",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        released: false,
+        message: "No pending stock reservation or draft order found for this reference.",
+      });
+    }
+
+    // 2. Validate session ownership / authorization
+    const sessionUserId = req.user?._id?.toString();
+    const reservationUserId = reservation.userId?.toString();
+    const guestToken =
+      req.headers["x-guest-token"] ||
+      req.body.guestToken ||
+      req.body.sessionToken;
+
+    const isOwner = sessionUserId && reservationUserId && sessionUserId === reservationUserId;
+    const isAdmin = req.user?.role === "admin";
+    const isMatchingGuest =
+      guestToken &&
+      ((reservation as any).guestToken === guestToken ||
+        (reservation.shippingInfo && (reservation.shippingInfo as any).guestToken === guestToken));
+    const isMatchingBodyUserId =
+      req.body.userId &&
+      reservationUserId &&
+      String(req.body.userId).trim() === reservationUserId;
+
+    if (sessionUserId) {
+      if (!isOwner && !isAdmin) {
+        return next(
+          new ErrorHandler("You are not authorized to cancel this order reservation.", 403)
+        );
+      }
+    } else if (!isMatchingGuest && !isMatchingBodyUserId) {
+      return next(
+        new ErrorHandler("Authentication or valid guest token required to release reservation.", 401)
+      );
+    }
+
+    // 3. Atomically release reserved stock back to available inventory
+    const releaseReason = req.body.reason || "USER_CANCELLED";
+    const result = await releaseStockReservation(reservation.razorpayOrderId, releaseReason);
+
+    // 4. Mark associated draft/pending order status as 'Cancelled' if present
+    let orderCancelled = false;
+    const associatedOrder = await Order.findOne({
+      $or: [
+        { "paymentInfo.razorpay_order_id": reservation.razorpayOrderId },
+        { "paymentInfo.id": reservation.razorpayOrderId },
+      ],
+    });
+
+    if (associatedOrder && associatedOrder.orderStatus === "Processing") {
+      associatedOrder.orderStatus = "Cancelled";
+      await associatedOrder.save();
+      orderCancelled = true;
+    }
 
     return res.status(200).json({
       success: true,
       released: result.success,
+      reservationStatus: result.success ? "RELEASED" : reservation.status,
+      orderStatus: orderCancelled ? "Cancelled" : undefined,
       message: result.success
-        ? "Stock reservation successfully released."
+        ? "Stock reservation successfully released back to available inventory."
         : "Reservation was not pending or was already released.",
     });
   }
