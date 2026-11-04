@@ -1,13 +1,15 @@
 import { Document, Query } from "mongoose";
 
-interface QueryString {
+export interface QueryString {
   [key: string]: any;
   keyword?: string;
   page?: string;
   limit?: string;
+  sort?: string;
+  pincode?: string;
 }
 
-class ApiFeatures<T extends Document> {
+class ApiFeatures<T extends Document = any> {
   query: Query<T[], T>;
   queryString: QueryString;
 
@@ -16,39 +18,78 @@ class ApiFeatures<T extends Document> {
     this.queryString = queryString;
   }
 
-  // 🔍 SECURE TEXT SEARCH ENGINE (With ReDoS Protection & Chain Preservation)
-  search(field: string = "name") {
-    if (this.queryString.keyword) {
+  /**
+   * 🔍 CASE-INSENSITIVE PARTIAL SUBSTRING SEARCH ENGINE
+   * Replaces MongoDB $text search with ReDoS-safe case-insensitive regex matching.
+   * Matches partial keywords (e.g. "alo" for "Aloe Vera", "ferti" for "Fertilizer")
+   * across multiple searchable fields via an $or condition.
+   *
+   * @param fields Array of field names or comma-separated string (defaults to ["name", "category", "tags", "description"])
+   */
+  search(fields: string | string[] = ["name", "category", "tags", "description"]) {
+    if (this.queryString.keyword && typeof this.queryString.keyword === "string") {
       const rawKeyword = this.queryString.keyword.trim();
 
       if (rawKeyword) {
-        // 🚀 STRATEGY 1: Full-Text Indexes ($text)
-        if (field === "name" || field === "category") {
-          this.query = this.query.find({
-            $text: { $search: rawKeyword },
-          });
-        } else {
-          // 🛡️ STRATEGY 2: SAFE REGEX FALLBACK (ReDoS Immunization)
-          const escapedKeyword = rawKeyword.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+        // 🛡️ RE-DOS & BUFFER OVERFLOW PROTECTION:
+        // Cap search term length to 100 characters to prevent CPU exhaustion on massive input strings
+        const truncatedKeyword = rawKeyword.slice(0, 100);
 
+        // Escape all regular expression special characters to ensure literal substring matching:
+        // . * + ? ^ $ { } ( ) | [ ] \
+        const escapedKeyword = truncatedKeyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+        // Parse target searchable fields
+        let targetFields: string[];
+        if (Array.isArray(fields)) {
+          targetFields = fields.length > 0 ? fields : ["name", "category", "tags", "description"];
+        } else if (typeof fields === "string") {
+          if (fields.includes(",")) {
+            targetFields = fields.split(",").map((f) => f.trim()).filter(Boolean);
+          } else if (fields === "name") {
+            // Backward compatibility: expand legacy single "name" argument to primary searchable fields
+            targetFields = ["name", "category", "tags", "description"];
+          } else {
+            targetFields = [fields.trim()];
+          }
+        } else {
+          targetFields = ["name", "category", "tags", "description"];
+        }
+
+        // Construct $or regex conditions with 'i' (case-insensitive) flag
+        const orConditions = targetFields.map((field) => ({
+          [field]: {
+            $regex: escapedKeyword,
+            $options: "i",
+          },
+        }));
+
+        // Merge with existing query filter cleanly
+        const currentFilter = this.query.getFilter();
+        if (currentFilter && currentFilter.$or) {
+          // If query already has an $or condition (e.g. multi-vendor ID filter),
+          // wrap in $and so MongoDB treats it as: (existing $or) AND (search $or)
           this.query = this.query.find({
-            [field]: {
-              $regex: escapedKeyword,
-              $options: "i",
-            },
-          });
+            $and: [{ $or: orConditions }],
+          } as any);
+        } else {
+          this.query = this.query.find({
+            $or: orConditions,
+          } as any);
         }
       }
     }
     return this;
   }
 
-  // 🛠️ FILTER (Price, Ratings, Categories, etc. with Whitelist-Enforced NoSQL Injection Protection)
+  /**
+   * 🛠️ FILTER (Price, Ratings, Categories, etc. with Whitelist-Enforced NoSQL Injection Protection)
+   */
   filter(allowedFieldsWhitelist: string[] = []) {
     const queryCopy = { ...this.queryString };
 
-    // Remove framework/pagination properties from filter pool
-    const removeFields = ["keyword", "page", "limit", "pincode"];
+    // Remove framework, search, sorting, and pagination properties from the document filter pool
+    const removeFields = ["keyword", "page", "limit", "pincode", "sort"];
     removeFields.forEach((field) => delete queryCopy[field]);
 
     // 🛡️ SANITIZATION LAYER: Strip unapproved keys and eliminate client-supplied MongoDB operators
@@ -61,7 +102,7 @@ class ApiFeatures<T extends Document> {
             continue;
           }
 
-          // 2. FIXED: Enforce explicit schema attribute whitelisting at root filter criteria level
+          // 2. Enforce explicit schema attribute whitelisting at root filter criteria level if provided
           if (isRoot && allowedFieldsWhitelist.length > 0 && !allowedFieldsWhitelist.includes(key)) {
             delete obj[key];
             continue;
@@ -86,7 +127,23 @@ class ApiFeatures<T extends Document> {
     return this;
   }
 
-  // 📄 PAGINATION 
+  /**
+   * 🔃 SORTING
+   * Applies sort order from query string (e.g. ?sort=-price,ratings) or default
+   */
+  sort(defaultSort: string | Record<string, 1 | -1> = "-createdAt") {
+    if (this.queryString.sort && typeof this.queryString.sort === "string") {
+      const sortBy = this.queryString.sort.split(",").join(" ");
+      this.query = this.query.sort(sortBy);
+    } else {
+      this.query = this.query.sort(defaultSort);
+    }
+    return this;
+  }
+
+  /**
+   * 📄 PAGINATION
+   */
   pagination(resultsPerPage: number) {
     const currentPage = Number(this.queryString.page) || 1;
     const skip = resultsPerPage * (currentPage - 1);

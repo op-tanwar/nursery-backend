@@ -208,6 +208,7 @@ plantSchema.index({ isActive: 1, price: 1 });
 // ⚡ PERF: Slug index for direct slug-based lookups and historical redirect lookups
 plantSchema.index({ slug: 1 }, { unique: true });
 plantSchema.index({ slugHistory: 1 });
+plantSchema.index({ name: 1 });
 plantSchema.index({ name: "text", category: "text" });
 
 const Plant: Model<IPlant> = mongoose.model<IPlant>("Plant", plantSchema);

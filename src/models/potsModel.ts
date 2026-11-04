@@ -219,6 +219,7 @@ potSchema.index({ isActive: 1, price: 1 });
 // ⚡ PERF: Slug index for direct slug-based lookups (avoids full catalog scan)
 potSchema.index({ slug: 1 }, { unique: true });
 potSchema.index({ slugHistory: 1 });
+potSchema.index({ name: 1 });
 potSchema.index({ name: "text", category: "text", material: "text" });
 
 const Pot: Model<IPot> = mongoose.model<IPot>("Pot", potSchema);
