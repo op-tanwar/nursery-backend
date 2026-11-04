@@ -11,7 +11,11 @@ export const validateUploadedFiles = (options?: { allowVideo?: boolean }) => {
     // Check if route context explicitly permits video uploads (e.g. unboxing / damage claims)
     const isClaimRoute = Boolean(
       req.originalUrl?.includes("/orders/claim") ||
+      req.originalUrl?.includes("/claims") ||
+      req.originalUrl?.includes("/returns") ||
+      req.originalUrl?.includes("/return-replacement") ||
       req.path?.includes("/claim") ||
+      req.path?.includes("/return") ||
       (req.baseUrl?.includes("/orders") && req.path?.includes("/claim"))
     );
     const allowVideo = Boolean(options?.allowVideo || isClaimRoute);

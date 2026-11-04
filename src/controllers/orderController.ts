@@ -58,6 +58,7 @@ import {
   processOrderPlacement,
   OrderPlacementService,
 } from "../services/orderPlacementService";
+import { createClaimRequest } from "./returnClaimController";
 
 export { modelRegistry, getCaseInsensitiveModel, calculateServerShippingAndTax };
 
@@ -973,100 +974,6 @@ export const deleteOrder = catchAsyncErrors(
 );
 
 // ======================================================================
-// 🛡️ 9. USER — CLAIM REPLACEMENT / REFUND
+// 🛡️ 9. USER — CLAIM REPLACEMENT / REFUND (DELEGATED TO UNIFIED CLAIM CONTROLLER)
 // ======================================================================
-export const requestItemClaim = catchAsyncErrors(
-  async (req: Request, res: Response, next: NextFunction) => {
-    const { orderId, itemId, claimType, reason } = req.body;
-
-    if (!req.files || Object.keys(req.files).length === 0) {
-      return next(new ErrorHandler("Unboxing proof (photo/video) is strictly mandatory.", 400));
-    }
-
-    const proofFile = req.files.proof as any;
-    if (!proofFile) {
-      return next(new ErrorHandler("Please upload a file under the field name 'proof'.", 400));
-    }
-
-    if (!["Replacement", "Refund"].includes(claimType)) {
-      return next(new ErrorHandler("Invalid claim type. Must be Replacement or Refund.", 400));
-    }
-
-    const order = await Order.findById(orderId);
-    if (!order) return next(new ErrorHandler("Order not found", 404));
-
-    if (order.user.toString() !== req.user?._id.toString()) {
-      return next(new ErrorHandler("Unauthorized action for this order context.", 403));
-    }
-
-    if (order.orderStatus !== "Delivered" || !order.deliveredAt) {
-      return next(new ErrorHandler("Claims can only be filed for successfully delivered orders.", 400));
-    }
-
-    const timeSinceDelivery = Date.now() - new Date(order.deliveredAt).getTime();
-    if (timeSinceDelivery / (1000 * 60 * 60) > 48) {
-      return next(new ErrorHandler("Policy expired. Claims must be submitted within 48 hours of delivery.", 400));
-    }
-
-    const item = order.orderItems.find(
-      (item) => item.item.toString() === itemId && item.status === "Delivered"
-    );
-
-    if (!item) {
-      return next(new ErrorHandler("Delivered inventory item not found in this order sequence.", 404));
-    }
-
-    if (item.claim?.isClaimed) {
-      return next(new ErrorHandler("A claim has already been filed for this particular item.", 400));
-    }
-
-    let proofUrl = "";
-    try {
-      const result = await cloudinary.v2.uploader.upload(proofFile.tempFilePath, {
-        folder: "urban_nursery_claims",
-        resource_type: "auto",
-      });
-      proofUrl = result.secure_url;
-    } catch (uploadError: any) {
-      return next(new ErrorHandler(`Unboxing proof upload failed: ${uploadError.message}`, 500));
-    }
-
-    item.claim = {
-      isClaimed: true,
-      claimType,
-      reason,
-      proofUrl,
-      status: "Pending",
-      claimedAt: new Date()
-    };
-
-    item.status = "Claimed";
-    await order.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Claim submitted successfully. It will be reviewed within 24 hours.",
-      claimStatus: "Pending"
-    });
-
-    try {
-      const populatedOrder = await Order.findById(orderId).populate("orderItems.item");
-      if (populatedOrder) {
-        const orderObj = populatedOrder.toObject();
-        const dynamicPopulatedItem = orderObj.orderItems.find((i: any) => i.item?._id.toString() === itemId);
-
-        if (dynamicPopulatedItem) {
-          const itemPayload = { ...dynamicPopulatedItem, claim: item.claim };
-          sendClaimAlertToAdmin(order._id.toString(), itemPayload, reason).catch((err) =>
-            console.error("❌ [Email Trigger Failed] Event: ClaimAlertAdmin, Error:", err?.message || err)
-          );
-          sendClaimAlertToNursery(dynamicPopulatedItem.nursery.toString(), order._id.toString(), itemPayload).catch((err) =>
-            console.error("❌ [Email Trigger Failed] Event: ClaimAlertNursery, Error:", err?.message || err)
-          );
-        }
-      }
-    } catch (err) {
-      console.error("Background notifications layer crashed:", err);
-    }
-  }
-);
+export const requestItemClaim = createClaimRequest;

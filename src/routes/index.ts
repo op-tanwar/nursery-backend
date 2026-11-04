@@ -23,6 +23,7 @@ import payoutRoutes from "./payoutRoute";
 import authRoutes from "./authRoute";
 import taxRoutes from "./taxRoute";
 import commissionRoutes from "./commissionRoute";
+import claimRoutes from "./claimRoutes";
 import returnRequestRoutes from "./returnRequestRoute";
 import returnReplacementRoutes from "./returnReplacementRoute";
 
@@ -66,9 +67,11 @@ mainRouter.use("/user", userRoutes);
 // 🛒 Orders, multi-vendor splits & tracking routes
 mainRouter.use("/orders", orderRouter);
 
-// 🔄 Return & Replacement Requests (Customer Claims, Nursery & Admin Workflow)
-mainRouter.use("/returns", returnRequestRoutes);
-mainRouter.use("/return-replacement", returnReplacementRoutes);
+// 🔄 Unified Return, Replacement & Damage Claims Engine (Customer Claims, Nursery & Admin Workflow)
+mainRouter.use("/claims", claimRoutes);
+mainRouter.use("/claim", claimRoutes);
+mainRouter.use("/returns", claimRoutes);
+mainRouter.use("/return-replacement", claimRoutes);
 
 // 🏡 Nursery Onboarding Applications & Vendor verification records
 mainRouter.use("/nursery-profile", nurseryProfileRoutes);
