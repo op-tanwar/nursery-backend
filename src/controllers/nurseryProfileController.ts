@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import slugify from "slugify";
 import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import ErrorHandler from "../utils/errorHandler";
+import { resolveSlugOrRedirect } from "../utils/slugify";
 import NurseryProfile from "../models/nurseryProfileModel";
 import User from "../models/userModel";
 import Plant from "../models/plantsModel";
@@ -537,6 +538,18 @@ export const getPublicVendorBySlug = catchAsyncErrors(
       });
       if (userMatch) {
         profile = await NurseryProfile.findOne({ nursery: userMatch._id }).populate(
+          "nursery",
+          "name businessName email avatar logo createdAt"
+        );
+      }
+    }
+
+    // Priority 5: Match by slugHistory or Redirect record
+    if (!profile) {
+      const resolution = await resolveSlugOrRedirect(NurseryProfile, decodedSlug, res);
+      if (resolution.doc) {
+        if (resolution.redirected) return;
+        profile = await NurseryProfile.findById(resolution.doc._id).populate(
           "nursery",
           "name businessName email avatar logo createdAt"
         );

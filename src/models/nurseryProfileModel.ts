@@ -1,6 +1,6 @@
 import mongoose, { Schema } from "mongoose";
-import slugify from "slugify";
 import { INurseryProfile } from "../types/nursery.types";
+import { handleDocumentSlug } from "../utils/slugify";
 
 const nurseryProfileSchema = new Schema<INurseryProfile>(
   {
@@ -17,6 +17,12 @@ const nurseryProfileSchema = new Schema<INurseryProfile>(
       sparse: true,   // Allow multiple docs with null slug without unique-key conflicts
       lowercase: true,
       trim: true,
+      index: true,
+    },
+    slugHistory: {
+      type: [String],
+      default: [],
+      index: true,
     },
     description: {
       type: String,
@@ -151,15 +157,14 @@ const nurseryProfileSchema = new Schema<INurseryProfile>(
 );
 
 nurseryProfileSchema.pre<INurseryProfile>("save", async function () {
-  if (this.isModified("businessName") || !this.slug) {
-    const baseSlug = slugify(this.businessName || "nursery", {
-      lower: true,
-      strict: true,
-    });
-    this.slug = baseSlug;
-  }
+  await handleDocumentSlug(this, {
+    sourceField: "businessName",
+    entityType: "NurseryProfile",
+    suffixLength: 6,
+  });
 });
 
+nurseryProfileSchema.index({ slugHistory: 1 });
 nurseryProfileSchema.index({ nursery: 1 });
 nurseryProfileSchema.index({ isActive: 1, approvalStatus: 1 });
 nurseryProfileSchema.index({ deliveryPincodes: 1, approvalStatus: 1, isActive: 1 });

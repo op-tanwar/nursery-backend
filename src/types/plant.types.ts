@@ -26,6 +26,8 @@ export interface ICloudinaryImage {
 export interface IPlant extends Document {
   name: string;
   slug?: string;
+  slugHistory?: string[];
+  updateSlug?: boolean;
   description: string;
   descriptionOption: IDescriptionOption;
   benefits: string[];

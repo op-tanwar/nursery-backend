@@ -34,7 +34,10 @@ export interface ICloudinaryImage {
 // Main Accessory Interface
 export interface IAccessory extends Document {
   name: string;
+  
   slug?: string;
+  slugHistory?: string[];
+  updateSlug?: boolean;
   description: string;
   descriptionOption: IDescriptionOption;
   specifications: ITechnicalSpecification;

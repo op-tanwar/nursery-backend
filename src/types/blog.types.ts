@@ -3,6 +3,8 @@ import { Document, Types } from "mongoose";
 export interface IBlog {
   title: string;
   slug: string;
+  slugHistory?: string[];
+  updateSlug?: boolean;
   content: string;
   author: Types.ObjectId; // References Admin or User (Nursery) document
   authorType: "Admin" | "Nursery";

@@ -11,6 +11,7 @@ import NurseryProfile from "../models/nurseryProfileModel";
 import Order from "../models/orderModel";
 import { getPluralKey, getSingularKey, getTotalCountKey } from "../utils/productRegistry";
 import cacheManager from "../utils/cacheManager";
+import { resolveSlugOrRedirect } from "../utils/slugify";
 
 // ⚡ High-speed in-memory cache for active nursery IDs
 const getCachedActiveNurseryIds = async (): Promise<string[]> => {
@@ -371,13 +372,14 @@ export const getAllResources = (ResourceModel: Model<any>) =>
 // ⚡ PERF: Allows frontend to look up by slug directly instead of fetching all 100 products
 export const getResourceBySlug = (ResourceModel: Model<any>) =>
   catchAsyncErrors(async (req: Request, res: Response, next: NextFunction) => {
-    const { slug } = req.params;
+    const rawSlug = req.params.slug;
+    const slug = String(Array.isArray(rawSlug) ? rawSlug[0] : rawSlug || "").trim();
 
-    const resourceDoc = await ResourceModel.findOne({ slug })
-      .select("-__v")
-      .lean<any>();
+    const resolution = await resolveSlugOrRedirect(ResourceModel, slug, res);
+    if (!resolution.doc) return next(new ErrorHandler(`${ResourceModel.modelName} not found`, 404));
+    if (resolution.redirected) return;
 
-    if (!resourceDoc) return next(new ErrorHandler(`${ResourceModel.modelName} not found`, 404));
+    const resourceDoc = resolution.doc;
 
     const nurseryProfileDoc = await NurseryProfile.findOne(
       { $or: [{ nursery: resourceDoc.nursery }, { _id: resourceDoc.nursery }] },
@@ -412,6 +414,9 @@ export const getResourceBySlug = (ResourceModel: Model<any>) =>
 
     res.status(200).json({
       success: true,
+      isRedirect: Boolean(resolution.newSlug),
+      newSlug: resolution.newSlug || resourceDoc.slug,
+      canonicalSlug: resourceDoc.slug,
       [getSingularKey(ResourceModel.modelName)]: {
         ...resourceDoc,
         nursery: vendorInfo,
@@ -762,6 +767,15 @@ export const updateResource = (
     if (hasExplicitGalleryUpdate || galleryImagesData.length > 0 || deletedPublicIds.length > 0) {
       resource.images = finalGalleryImages;
       resource.markModified("images");
+    }
+
+    if (
+      parsedBody.updateSlug === true ||
+      parsedBody.updateSlug === "true" ||
+      req.body?.updateSlug === true ||
+      req.body?.updateSlug === "true"
+    ) {
+      (resource as any).updateSlug = true;
     }
 
     const updatedResource = await resource.save();

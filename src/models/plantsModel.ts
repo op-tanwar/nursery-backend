@@ -1,6 +1,6 @@
 import mongoose, { Schema, Model } from "mongoose";
-import slugify from "slugify";
 import { IReview, IPlant } from "../types/plant.types";
+import { handleDocumentSlug } from "../utils/slugify";
 
 export { IReview, IPlant };
 
@@ -16,6 +16,12 @@ const plantSchema: Schema<IPlant> = new Schema(
       unique: true,
       lowercase: true,
       trim: true,
+      index: true,
+    },
+    slugHistory: {
+      type: [String],
+      default: [],
+      index: true,
     },
     description: {
       type: String,
@@ -186,14 +192,11 @@ plantSchema.virtual("availableStock").get(function () {
 });
 
 plantSchema.pre<IPlant>("save", async function () {
-  if (this.isModified("name")) {
-    const baseSlug = slugify(this.name, {
-      lower: true,
-      strict: true,
-    });
-    const uniqueSuffix = Math.floor(1000 + Math.random() * 9000);
-    this.slug = `${baseSlug}-${uniqueSuffix}`;
-  }
+  await handleDocumentSlug(this, {
+    sourceField: "name",
+    entityType: "Plant",
+    suffixLength: 6,
+  });
 });
 
 // ⚡ PERF: Compound index for the most-used filter (active products from active nurseries)
@@ -202,8 +205,9 @@ plantSchema.index({ isActive: 1, category: 1, createdAt: -1 });
 plantSchema.index({ isActive: 1, category: 1, price: 1 });
 plantSchema.index({ isActive: 1, ratings: -1 });
 plantSchema.index({ isActive: 1, price: 1 });
-// ⚡ PERF: Slug index for direct slug-based lookups (avoids full catalog scan)
-plantSchema.index({ slug: 1 });
+// ⚡ PERF: Slug index for direct slug-based lookups and historical redirect lookups
+plantSchema.index({ slug: 1 }, { unique: true });
+plantSchema.index({ slugHistory: 1 });
 plantSchema.index({ name: "text", category: "text" });
 
 const Plant: Model<IPlant> = mongoose.model<IPlant>("Plant", plantSchema);

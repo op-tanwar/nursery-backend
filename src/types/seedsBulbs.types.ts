@@ -21,7 +21,10 @@ export interface ICloudinaryImage {
 
 export interface ISeedsBulbs extends Document {
   name: string;
+  
   slug?: string;
+  slugHistory?: string[];
+  updateSlug?: boolean;
   description: string;
   descriptionOption: IDescriptionOption;
   sowingSeason: string[];

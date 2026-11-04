@@ -27,7 +27,10 @@ export interface IDimensions {
 
 export interface IPlantStandsShelves extends Document {
   name: string;
+  
   slug?: string;
+  slugHistory?: string[];
+  updateSlug?: boolean;
   description: string;
   descriptionOption: IDescriptionOption;
   material: string;

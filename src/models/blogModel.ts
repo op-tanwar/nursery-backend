@@ -1,6 +1,6 @@
 import mongoose, { Schema } from "mongoose";
-import slugify from "slugify";
 import { IBlogDocument } from "../types/blog.types";
+import { handleDocumentSlug } from "../utils/slugify";
 
 const blogSchema = new Schema<IBlogDocument>(
   {
@@ -14,6 +14,12 @@ const blogSchema = new Schema<IBlogDocument>(
       unique: true,
       lowercase: true,
       trim: true,
+      index: true,
+    },
+    slugHistory: {
+      type: [String],
+      default: [],
+      index: true,
     },
     content: {
       type: String,
@@ -48,17 +54,14 @@ const blogSchema = new Schema<IBlogDocument>(
 );
 
 blogSchema.pre<IBlogDocument>("save", async function () {
-  if (this.isModified("title")) {
-    const baseSlug = slugify(this.title, {
-      lower: true,
-      strict: true,
-    });
-
-    const uniqueSuffix = Math.floor(1000 + Math.random() * 9000);
-    this.slug = `${baseSlug}-${uniqueSuffix}`;
-  }
+  await handleDocumentSlug(this, {
+    sourceField: "title",
+    entityType: "Blog",
+    suffixLength: 6,
+  });
 });
 
+blogSchema.index({ slugHistory: 1 });
 blogSchema.index({ createdAt: -1 });
 blogSchema.index({ author: 1, createdAt: -1 });
 

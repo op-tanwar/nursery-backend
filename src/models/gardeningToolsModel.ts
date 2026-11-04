@@ -1,5 +1,5 @@
 import mongoose, { Schema, Model } from "mongoose";
-import slugify from "slugify";
+import { handleDocumentSlug } from "../utils/slugify";
 import { IGardeningTool } from "../types/gardeningTools.types";
 
 export { IGardeningTool };
@@ -16,6 +16,11 @@ const gardeningToolSchema: Schema<IGardeningTool> = new Schema(
       unique: true,
       lowercase: true,
       trim: true,
+    },
+    slugHistory: {
+      type: [String],
+      default: [],
+      index: true,
     },
     description: {
       type: String,
@@ -142,11 +147,11 @@ gardeningToolSchema.virtual("availableStock").get(function () {
 });
 
 gardeningToolSchema.pre<IGardeningTool>("save", async function () {
-  if (this.isModified("name")) {
-    const baseSlug = slugify(this.name, { lower: true, strict: true });
-    const uniqueSuffix = Math.floor(1000 + Math.random() * 9000);
-    this.slug = `${baseSlug}-${uniqueSuffix}`;
-  }
+  await handleDocumentSlug(this, {
+    sourceField: "name",
+    entityType: "GardeningTool",
+    suffixLength: 6,
+  });
 });
 
 gardeningToolSchema.index({ nursery: 1, isActive: 1 });
@@ -154,7 +159,8 @@ gardeningToolSchema.index({ isActive: 1, category: 1, createdAt: -1 });
 gardeningToolSchema.index({ isActive: 1, category: 1, price: 1 });
 gardeningToolSchema.index({ isActive: 1, ratings: -1 });
 gardeningToolSchema.index({ isActive: 1, price: 1 });
-gardeningToolSchema.index({ slug: 1 });
+gardeningToolSchema.index({ slug: 1 }, { unique: true });
+gardeningToolSchema.index({ slugHistory: 1 });
 gardeningToolSchema.index({ name: "text", category: "text" });
 
 const GardeningTool: Model<IGardeningTool> = mongoose.model<IGardeningTool>(

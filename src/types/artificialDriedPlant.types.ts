@@ -35,7 +35,10 @@ export interface ICloudinaryImage {
 // Main Artificial Interface
 export interface IArtificial extends Document {
   name: string;
+  
   slug?: string;
+  slugHistory?: string[];
+  updateSlug?: boolean;
   description: string;
   descriptionOption: IDescriptionOption;
   specifications: IArtificialSpecification;

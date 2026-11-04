@@ -1,6 +1,6 @@
 import mongoose, { Schema, Model } from "mongoose";
-import slugify from "slugify";
 import { IReview, IPot } from "../types/pots.types";
+import { handleDocumentSlug } from "../utils/slugify";
 
 export { IReview, IPot };
 
@@ -16,6 +16,12 @@ const potSchema: Schema<IPot> = new Schema(
       unique: true,
       lowercase: true,
       trim: true,
+      index: true,
+    },
+    slugHistory: {
+      type: [String],
+      default: [],
+      index: true,
     },
     description: {
       type: String,
@@ -197,14 +203,11 @@ potSchema.virtual("availableStock").get(function () {
 });
 
 potSchema.pre<IPot>("save", async function () {
-  if (this.isModified("name")) {
-    const baseSlug = slugify(this.name, {
-      lower: true,
-      strict: true,
-    });
-    const uniqueSuffix = Math.floor(1000 + Math.random() * 9000);
-    this.slug = `${baseSlug}-${uniqueSuffix}`;
-  }
+  await handleDocumentSlug(this, {
+    sourceField: "name",
+    entityType: "Pot",
+    suffixLength: 6,
+  });
 });
 
 // ⚡ PERF: Compound index for the most-used filter (active products from active nurseries)
@@ -214,7 +217,8 @@ potSchema.index({ isActive: 1, category: 1, price: 1 });
 potSchema.index({ isActive: 1, ratings: -1 });
 potSchema.index({ isActive: 1, price: 1 });
 // ⚡ PERF: Slug index for direct slug-based lookups (avoids full catalog scan)
-potSchema.index({ slug: 1 });
+potSchema.index({ slug: 1 }, { unique: true });
+potSchema.index({ slugHistory: 1 });
 potSchema.index({ name: "text", category: "text", material: "text" });
 
 const Pot: Model<IPot> = mongoose.model<IPot>("Pot", potSchema);

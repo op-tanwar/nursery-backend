@@ -78,6 +78,8 @@ export interface INurseryProfile extends Document {
   nursery: Types.ObjectId;
   businessName: string;
   slug: string;
+  slugHistory?: string[];
+  updateSlug?: boolean;
   description?: string;
   coverImage?: {
     public_id?: string;

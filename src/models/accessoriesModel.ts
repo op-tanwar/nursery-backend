@@ -1,5 +1,5 @@
 import mongoose, { Schema, Model } from "mongoose";
-import slugify from "slugify";
+import { handleDocumentSlug } from "../utils/slugify";
 import { IReview, IAccessory } from "../types/accessories.types";
 
 export { IReview, IAccessory };
@@ -16,6 +16,11 @@ const accessorySchema: Schema<IAccessory> = new Schema(
       unique: true,
       lowercase: true,
       trim: true,
+    },
+    slugHistory: {
+      type: [String],
+      default: [],
+      index: true,
     },
     description: {
       type: String,
@@ -176,14 +181,11 @@ accessorySchema.virtual("availableStock").get(function () {
 });
 
 accessorySchema.pre<IAccessory>("save", async function () {
-  if (this.isModified("name")) {
-    const baseSlug = slugify(this.name, {
-      lower: true,
-      strict: true,
-    });
-    const uniqueSuffix = Math.floor(1000 + Math.random() * 9000);
-    this.slug = `${baseSlug}-${uniqueSuffix}`;
-  }
+  await handleDocumentSlug(this, {
+    sourceField: "name",
+    entityType: "Accessory",
+    suffixLength: 6,
+  });
 });
 
 accessorySchema.index({ nursery: 1, isActive: 1 });
@@ -191,7 +193,8 @@ accessorySchema.index({ isActive: 1, category: 1, createdAt: -1 });
 accessorySchema.index({ isActive: 1, category: 1, price: 1 });
 accessorySchema.index({ isActive: 1, ratings: -1 });
 accessorySchema.index({ isActive: 1, price: 1 });
-accessorySchema.index({ slug: 1 });
+accessorySchema.index({ slug: 1 }, { unique: true });
+accessorySchema.index({ slugHistory: 1 });
 accessorySchema.index({ name: "text", category: "text" });
 
 const Accessory: Model<IAccessory> = mongoose.model<IAccessory>("Accessory", accessorySchema);

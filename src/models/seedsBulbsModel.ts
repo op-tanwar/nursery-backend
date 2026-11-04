@@ -1,5 +1,5 @@
 import mongoose, { Schema, Model } from "mongoose";
-import slugify from "slugify";
+import { handleDocumentSlug } from "../utils/slugify";
 import { ISeedsBulbs } from "../types/seedsBulbs.types";
 
 export { ISeedsBulbs };
@@ -16,6 +16,11 @@ const seedsBulbsSchema: Schema<ISeedsBulbs> = new Schema(
       unique: true,
       lowercase: true,
       trim: true,
+    },
+    slugHistory: {
+      type: [String],
+      default: [],
+      index: true,
     },
     description: {
       type: String,
@@ -139,11 +144,11 @@ seedsBulbsSchema.virtual("availableStock").get(function () {
 });
 
 seedsBulbsSchema.pre<ISeedsBulbs>("save", async function () {
-  if (this.isModified("name")) {
-    const baseSlug = slugify(this.name, { lower: true, strict: true });
-    const uniqueSuffix = Math.floor(1000 + Math.random() * 9000);
-    this.slug = `${baseSlug}-${uniqueSuffix}`;
-  }
+  await handleDocumentSlug(this, {
+    sourceField: "name",
+    entityType: "SeedsBulbs",
+    suffixLength: 6,
+  });
 });
 
 seedsBulbsSchema.index({ nursery: 1, isActive: 1 });
@@ -151,7 +156,8 @@ seedsBulbsSchema.index({ isActive: 1, category: 1, createdAt: -1 });
 seedsBulbsSchema.index({ isActive: 1, category: 1, price: 1 });
 seedsBulbsSchema.index({ isActive: 1, ratings: -1 });
 seedsBulbsSchema.index({ isActive: 1, price: 1 });
-seedsBulbsSchema.index({ slug: 1 });
+seedsBulbsSchema.index({ slug: 1 }, { unique: true });
+seedsBulbsSchema.index({ slugHistory: 1 });
 seedsBulbsSchema.index({ name: "text", category: "text" });
 
 const SeedsBulbs: Model<ISeedsBulbs> = mongoose.model<ISeedsBulbs>(

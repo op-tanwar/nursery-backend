@@ -1,5 +1,5 @@
 import mongoose, { Schema, Model } from "mongoose";
-import slugify from "slugify";
+import { handleDocumentSlug } from "../utils/slugify";
 import { IPlantCare } from "../types/plantCare.types";
 
 export { IPlantCare };
@@ -16,6 +16,11 @@ const plantCareSchema: Schema<IPlantCare> = new Schema(
       unique: true,
       lowercase: true,
       trim: true,
+    },
+    slugHistory: {
+      type: [String],
+      default: [],
+      index: true,
     },
     description: {
       type: String,
@@ -146,11 +151,11 @@ plantCareSchema.virtual("availableStock").get(function () {
 });
 
 plantCareSchema.pre<IPlantCare>("save", async function () {
-  if (this.isModified("name")) {
-    const baseSlug = slugify(this.name, { lower: true, strict: true });
-    const uniqueSuffix = Math.floor(1000 + Math.random() * 9000);
-    this.slug = `${baseSlug}-${uniqueSuffix}`;
-  }
+  await handleDocumentSlug(this, {
+    sourceField: "name",
+    entityType: "PlantCare",
+    suffixLength: 6,
+  });
 });
 
 plantCareSchema.index({ nursery: 1, isActive: 1 });
@@ -158,7 +163,8 @@ plantCareSchema.index({ isActive: 1, category: 1, createdAt: -1 });
 plantCareSchema.index({ isActive: 1, category: 1, price: 1 });
 plantCareSchema.index({ isActive: 1, ratings: -1 });
 plantCareSchema.index({ isActive: 1, price: 1 });
-plantCareSchema.index({ slug: 1 });
+plantCareSchema.index({ slug: 1 }, { unique: true });
+plantCareSchema.index({ slugHistory: 1 });
 plantCareSchema.index({ name: "text", category: "text" });
 
 const PlantCare: Model<IPlantCare> = mongoose.model<IPlantCare>(

@@ -6,6 +6,7 @@ import ErrorHandler from "../utils/errorHandler";
 import Blog from "../models/blogModel";
 import { sendNewBlogNotificationEmail } from "../utils/blogEmailService";
 import cacheManager from "../utils/cacheManager";
+import { resolveSlugOrRedirect } from "../utils/slugify";
 
 // Helper function to cleanly escape special regex characters: \ ^ $ * + ? . ( ) | { } [ ]
 const escapeRegexCharacters = (text: string): string => {
@@ -119,6 +120,18 @@ export const getBlogBySlug = catchAsyncErrors(
       .lean();
 
     if (!blog) {
+      const resolution = await resolveSlugOrRedirect(Blog, cleanSlug, res);
+      if (resolution.doc) {
+        if (resolution.redirected) return;
+        return res.status(200).json({
+          success: true,
+          isRedirect: Boolean(resolution.newSlug),
+          newSlug: resolution.newSlug || resolution.doc.slug,
+          data: resolution.doc,
+          blog: resolution.doc,
+        });
+      }
+
       return res.status(404).json({
         success: false,
         message: `Blog post not found for slug: ${cleanSlug}`,
