@@ -138,14 +138,6 @@ export const createRazorpayOrder = catchAsyncErrors(
       return next(new ErrorHandler("Computed transaction checkout value must be greater than zero.", 400));
     }
 
-    const minimalTrackingItems = authoritativeItems.map((ai) => ({
-      item: ai.product._id.toString(),
-      itemModel: ai.modelName,
-      category: ai.category,
-      quantity: ai.quantity,
-      nursery: ai.product.nursery ? ai.product.nursery.toString() : "",
-    }));
-
     // 🔒 3. ATOMIC STOCK RESERVATION LOCK (15-Minute TTL)
     // Atomically increments reservedStock across all items with instant rollback on any collision
     const itemsToLock = authoritativeItems.map((ai) => ({
@@ -166,14 +158,27 @@ export const createRazorpayOrder = catchAsyncErrors(
       );
     }
 
+    // 🛡️ Razorpay Notes: Must strictly adhere to max 256 characters per value & max 30 chars per key.
+    // Instead of stringifying full large objects (which easily breaches 256 characters),
+    // we store safe, truncated customer/order metadata here while storing complete data in MongoDB StockReservation.
+    const safeCustomerName = String(req.body.shippingInfo?.name || req.user.name || "Customer").substring(0, 50);
+    const safeCustomerEmail = String(req.user?.email || "").substring(0, 100);
+    const safeCustomerPhone = String(req.body.shippingInfo?.phone || "").substring(0, 20);
+    const safeShippingCity = String(req.body.shippingInfo?.city || "").substring(0, 50);
+    const safeShippingPin = String(req.body.shippingInfo?.pinCode || "").substring(0, 10);
+
     const options = {
       amount: totals.totalPricePaise, // Accurate to smallest currency unit (Paise)
       currency: "INR",
       receipt: `rcpt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       notes: {
         userId: req.user._id.toString(),
-        shippingInfo: JSON.stringify(req.body.shippingInfo || {}),
-        orderItems: JSON.stringify(minimalTrackingItems),
+        customerName: safeCustomerName,
+        customerEmail: safeCustomerEmail,
+        customerPhone: safeCustomerPhone,
+        shippingCity: safeShippingCity,
+        shippingPinCode: safeShippingPin,
+        itemCount: String(authoritativeItems.length),
       },
     };
 
@@ -187,14 +192,16 @@ export const createRazorpayOrder = catchAsyncErrors(
       return next(new ErrorHandler(`Razorpay order creation failed: ${err.message}`, 502));
     }
 
-    // 📝 Persist StockReservation document with 15-minute TTL
+    // 📝 Persist StockReservation document with 15-minute TTL including authoritative shippingInfo
     let reservation: any = null;
     try {
       reservation = await createStockReservationRecord(
         razorpayOrder.id,
         req.user._id,
         lockResult.lockedItems,
-        15
+        15,
+        undefined,
+        req.body.shippingInfo
       );
     } catch (err: any) {
       console.error("🚨 [StockReservation] Error persisting reservation record:", err);
@@ -688,13 +695,7 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
     if (bodyData.event === "order.paid") {
       const paymentEntity = bodyData.payload.payment.entity;
       const orderEntity = bodyData.payload.order.entity;
-      const checkoutNotes = orderEntity.notes;
-
-      if (!checkoutNotes || !checkoutNotes.shippingInfo || !checkoutNotes.orderItems) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({ status: "failed", message: "Webhook missing tracking notes payload structure." });
-      }
+      const checkoutNotes = orderEntity.notes || {};
 
       // Check for an already established order entity context (Idempotency)
       const existingOrder = await Order.findOne({ "paymentInfo.id": paymentEntity.id }).session(session);
@@ -704,8 +705,55 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
         return res.status(200).json({ status: "ok", message: "Duplicate event handled safely." });
       }
 
-      const shippingInfo = JSON.parse(checkoutNotes.shippingInfo);
-      const rawOrderItems = JSON.parse(checkoutNotes.orderItems);
+      // 🔍 1. Retrieve authoritative order context from StockReservation in MongoDB
+      const reservation = await StockReservation.findOne({
+        razorpayOrderId: orderEntity.id,
+      }).session(session);
+
+      let shippingInfo: any = reservation?.shippingInfo || null;
+      let rawOrderItems: any[] = [];
+      let userId: string = (reservation?.userId ? reservation.userId.toString() : "") || checkoutNotes.userId || paymentEntity.notes?.userId || "";
+
+      if (reservation && reservation.items && reservation.items.length > 0) {
+        rawOrderItems = reservation.items.map((it: any) => ({
+          productId: it.productId ? it.productId.toString() : "",
+          item: it.productId ? it.productId.toString() : "",
+          itemModel: it.itemModel,
+          quantity: it.quantity,
+          name: it.name,
+          price: it.price,
+        }));
+      }
+
+      // 🔍 2. Fallback to checkoutNotes if legacy order had notes
+      if (!shippingInfo && checkoutNotes.shippingInfo) {
+        try {
+          shippingInfo = typeof checkoutNotes.shippingInfo === "string"
+            ? JSON.parse(checkoutNotes.shippingInfo)
+            : checkoutNotes.shippingInfo;
+        } catch (e) {
+          console.warn("⚠️ [Webhook] Could not parse shippingInfo from checkoutNotes:", e);
+        }
+      }
+
+      if ((!rawOrderItems || rawOrderItems.length === 0) && checkoutNotes.orderItems) {
+        try {
+          rawOrderItems = typeof checkoutNotes.orderItems === "string"
+            ? JSON.parse(checkoutNotes.orderItems)
+            : checkoutNotes.orderItems;
+        } catch (e) {
+          console.warn("⚠️ [Webhook] Could not parse orderItems from checkoutNotes:", e);
+        }
+      }
+
+      if (!shippingInfo || !rawOrderItems || rawOrderItems.length === 0 || !userId) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({
+          status: "failed",
+          message: "Webhook missing required order context (reservation record or tracking notes not found).",
+        });
+      }
 
       const taxMap = await getActiveTaxMap();
 
@@ -797,10 +845,6 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
       }
 
       // 🔍 5. STOCK RESERVATION STATUS EVALUATION
-      const reservation = await StockReservation.findOne({
-        razorpayOrderId: orderEntity.id,
-      }).session(session);
-
       const isReservationPending =
         reservation && reservation.status === "PENDING";
 
@@ -888,9 +932,9 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
             razorpayPaymentId: paymentEntity.id,
             razorpayOrderId: orderEntity.id,
             amountPaise: exactAmountPaidPaise,
-            userId: checkoutNotes.userId,
+            userId: userId,
             customerEmail: paymentEntity.email,
-            customerName: paymentEntity.notes?.customerName || "Customer",
+            customerName: paymentEntity.notes?.customerName || shippingInfo?.name || "Customer",
             reason: "STOCK_DEPLETED_POST_TTL_WEBHOOK",
             orderItems: verifiedOrderItems,
           });
@@ -910,7 +954,7 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
           {
             shippingInfo,
             orderItems: verifiedOrderItems,
-            user: checkoutNotes.userId,
+            user: userId,
             paymentInfo: {
               id: paymentEntity.id,
               orderId: orderEntity.id,

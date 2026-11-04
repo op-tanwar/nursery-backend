@@ -147,7 +147,8 @@ export const createStockReservationRecord = async (
   userId: Types.ObjectId | string,
   items: ReservationLockItem[],
   ttlMinutes = 15,
-  session?: mongoose.ClientSession
+  session?: mongoose.ClientSession,
+  shippingInfo?: any
 ): Promise<IStockReservation> => {
   const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
 
@@ -161,6 +162,7 @@ export const createStockReservationRecord = async (
       name: it.name,
       price: it.price,
     })),
+    shippingInfo: shippingInfo || null,
     status: "PENDING",
     expiresAt,
   });

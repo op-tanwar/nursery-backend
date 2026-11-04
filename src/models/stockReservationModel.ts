@@ -12,6 +12,7 @@ export interface IStockReservation extends Document {
   razorpayOrderId: string;
   userId: Types.ObjectId;
   items: IStockReservationItem[];
+  shippingInfo?: any;
   status: "PENDING" | "COMMITTED" | "RELEASED";
   expiresAt: Date;
   committedAt?: Date;
@@ -73,6 +74,10 @@ const stockReservationSchema = new Schema<IStockReservation>(
         (val: IStockReservationItem[]) => val.length > 0,
         "Stock reservation must contain at least one item",
       ],
+    },
+    shippingInfo: {
+      type: Object,
+      default: null,
     },
     status: {
       type: String,
