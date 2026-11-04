@@ -67,7 +67,7 @@ export const createBlog = catchAsyncErrors(
 
     const excerpt = content.replace(/<[^>]*>/g, "").substring(0, 150) + "...";
 
-    cacheManager.invalidatePattern("blogs:");
+    await cacheManager.invalidatePattern("blogs:");
 
     sendNewBlogNotificationEmail({
       title: blog.title,
@@ -264,7 +264,7 @@ export const updateBlog = catchAsyncErrors(
     }
 
     await blog.save();
-    cacheManager.invalidatePattern("blogs:");
+    await cacheManager.invalidatePattern("blogs:");
 
     res.status(200).json({
       success: true,
@@ -290,7 +290,7 @@ export const deleteBlog = catchAsyncErrors(
     }
 
     await blog.deleteOne();
-    cacheManager.invalidatePattern("blogs:");
+    await cacheManager.invalidatePattern("blogs:");
 
     res.status(200).json({
       success: true,

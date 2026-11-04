@@ -23,6 +23,7 @@
   "dependencies": {
     "@types/compression": "^1.8.1",
     "@types/express-fileupload": "^1.5.1",
+    "@types/ioredis": "^4.28.10",
     "@types/nodemailer": "^8.0.0",
     "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
@@ -37,6 +38,7 @@
     "google-auth-library": "^11.1.0",
     "helmet": "^8.2.0",
     "india-pincode": "^2.5.9",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.6.3",
     "nodemailer": "^8.0.10",

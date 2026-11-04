@@ -186,7 +186,7 @@ export const createResource = (ResourceModel: Model<any>, folderName: string, pa
     };
 
     const resource = await ResourceModel.create(resourceData);
-    cacheManager.invalidatePattern(`catalog:${ResourceModel.modelName}:`);
+    await cacheManager.invalidatePattern(`catalog:${ResourceModel.modelName}:`);
 
     res.status(201).json({
       success: true,
@@ -780,7 +780,7 @@ export const updateResource = (
 
     const updatedResource = await resource.save();
 
-    cacheManager.invalidatePattern(`catalog:${ResourceModel.modelName}:`);
+    await cacheManager.invalidatePattern(`catalog:${ResourceModel.modelName}:`);
 
     res.status(200).json({
       success: true,
@@ -819,7 +819,7 @@ export const deleteResource = (ResourceModel: Model<any>) =>
     if (cleanupPromises.length > 0) await Promise.all(cleanupPromises);
 
     await resource.deleteOne();
-    cacheManager.invalidatePattern(`catalog:${ResourceModel.modelName}:`);
+    await cacheManager.invalidatePattern(`catalog:${ResourceModel.modelName}:`);
 
     res.status(200).json({
       success: true,

@@ -30,9 +30,10 @@ import mongoose from "mongoose";
 import { validateEnvironment } from "./utils/env";
 import { warmPincodeIndex, getServiceRadiusKm } from "./utils/pincodeService";
 import { verifyEmailConnection } from "./utils/sendEmail";
+import { initRedis, disconnectRedis } from "./config/redis";
 import {
-  startStockReservationWorker,
-  stopStockReservationWorker,
+  initDistributedStockReservation,
+  shutdownDistributedStockReservation,
 } from "./services/stockReservationService";
 
 // ======================================================================
@@ -56,8 +57,9 @@ const startServer = async () => {
     await connectDatabase();
     await verifyEmailConnection();
 
-    // 🧹 Initialize Stock Reservation TTL Sweeper Worker (runs every 60s)
-    startStockReservationWorker(60000);
+    // 🔌 Initialize Enterprise Redis Client & Distributed Stock Reservation Subsystem
+    await initRedis();
+    await initDistributedStockReservation();
 
     try {
       warmPincodeIndex();
@@ -102,8 +104,8 @@ process.on("unhandledRejection", (err: any) => {
 const handleGracefulShutdown = (signal: string) => {
   console.log(`\n🛑 System received ${signal}. Initiating graceful lifecycle termination pipeline...`);
 
-  // Stop background reservation sweeper worker cleanly
-  stopStockReservationWorker();
+  // Stop distributed stock reservation worker cleanly
+  shutdownDistributedStockReservation();
 
   // Safety forcing switch if hanging processes refuse release controls
   const forceShutdownTimeout = setTimeout(() => {
@@ -118,7 +120,11 @@ const handleGracefulShutdown = (signal: string) => {
       try {
         // Clean database disconnection process
         await mongoose.connection.close(false);
-        console.log("🍃 MongoDB connection connection pool closed gracefully.");
+        console.log("🍃 MongoDB connection pool closed gracefully.");
+
+        // Clean Redis disconnection process
+        await disconnectRedis();
+        console.log("🔴 Redis connection closed gracefully.");
 
         clearTimeout(forceShutdownTimeout);
         process.exit(0);

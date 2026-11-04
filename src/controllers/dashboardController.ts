@@ -395,14 +395,14 @@ const resolveProductName = async (
   itemModel: string
 ): Promise<string> => {
   const cacheKey = `pname:${itemModel}:${String(itemId)}`;
-  const cached = cacheManager.get<string>(cacheKey);
+  const cached = await cacheManager.get<string>(cacheKey);
   if (cached) return cached;
 
   const TargetModel = getCaseInsensitiveModel(itemModel);
   if (!TargetModel) return "Unknown Product";
   const doc = await TargetModel.findById(itemId).select("name").lean();
   const name = (doc as any)?.name || "Unknown Product";
-  cacheManager.set(cacheKey, name, 600); // 10 min TTL
+  await cacheManager.set(cacheKey, name, 600); // 10 min TTL
   return name;
 };
 

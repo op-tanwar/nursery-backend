@@ -4,6 +4,14 @@ import StockReservation, {
   IStockReservationItem,
 } from "../models/stockReservationModel";
 import { getCaseInsensitiveModel } from "../utils/productRegistry";
+import {
+  acquireLock,
+  releaseLock,
+  withLock,
+  getRedisClient,
+  getRedisSubscriber,
+  isRedisReady,
+} from "../config/redis";
 
 export interface ReservationLockItem {
   productId: Types.ObjectId | string;
@@ -26,6 +34,7 @@ export interface ReserveStockResult {
 
 /**
  * 🔒 Atomically reserve stock for an array of items with immediate rollback on any partial failure.
+ * Uses distributed locking per product to prevent concurrent double-booking of stock across containers.
  * Ensures availableStock = (stock - reservedStock) >= quantity for each item.
  */
 export const reserveStockForItems = async (
@@ -54,57 +63,70 @@ export const reserveStockForItems = async (
     const productId = new mongoose.Types.ObjectId(item.productId);
     const quantity = Math.max(1, Number(item.quantity));
 
-    // 🔒 Atomic conditional update: only increment reservedStock if availableStock >= quantity
-    const updated = await TargetModel.findOneAndUpdate(
-      {
-        _id: productId,
-        isActive: true,
-        $expr: {
-          $gte: [
-            {
-              $subtract: [
-                { $ifNull: ["$stock", 0] },
-                { $ifNull: ["$reservedStock", 0] },
-              ],
-            },
-            quantity,
-          ],
-        },
-      },
-      {
-        $inc: { reservedStock: quantity },
-      },
-      {
-        new: true,
-        ...(session ? { session } : {}),
-      }
-    );
+    // 🔒 Acquire distributed lock for this product to prevent concurrent double-booking across instances
+    const lockResource = `product_stock:${productId.toString()}`;
+    let lockToken: string | null = null;
+    try {
+      lockToken = await acquireLock(lockResource, 5000);
+    } catch (_) {}
 
-    if (!updated) {
-      // Stock allocation failed for this item — rollback all previous locks
-      console.warn(
-        `⚠️ [StockReservation] Insufficient stock or inactive product for ${item.itemModel} (${item.productId}). Quantity requested: ${quantity}. Rolling back locks...`
+    try {
+      // Atomic conditional update: only increment reservedStock if availableStock >= quantity
+      const updated = await TargetModel.findOneAndUpdate(
+        {
+          _id: productId,
+          isActive: true,
+          $expr: {
+            $gte: [
+              {
+                $subtract: [
+                  { $ifNull: ["$stock", 0] },
+                  { $ifNull: ["$reservedStock", 0] },
+                ],
+              },
+              quantity,
+            ],
+          },
+        },
+        {
+          $inc: { reservedStock: quantity },
+        },
+        {
+          new: true,
+          ...(session ? { session } : {}),
+        }
       );
-      await rollbackLockedItems(lockedItems, session);
-      return {
-        success: false,
-        lockedItems: [],
-        failedItem: {
-          productId: item.productId,
-          itemModel: item.itemModel,
-          quantity,
-          reason: `Insufficient available stock for ${item.name || item.itemModel}`,
-        },
-      };
-    }
 
-    lockedItems.push({
-      productId,
-      itemModel: item.itemModel,
-      quantity,
-      name: item.name || updated.name,
-      price: item.price ?? updated.price,
-    });
+      if (!updated) {
+        // Stock allocation failed for this item — rollback all previous locks
+        console.warn(
+          `⚠️ [StockReservation] Insufficient stock or inactive product for ${item.itemModel} (${item.productId}). Quantity requested: ${quantity}. Rolling back locks...`
+        );
+        await rollbackLockedItems(lockedItems, session);
+        return {
+          success: false,
+          lockedItems: [],
+          failedItem: {
+            productId: item.productId,
+            itemModel: item.itemModel,
+            quantity,
+            reason: `Insufficient available stock for ${item.name || item.itemModel}`,
+          },
+        };
+      }
+
+      lockedItems.push({
+        productId,
+        itemModel: item.itemModel,
+        quantity,
+        name: item.name || updated.name,
+        price: item.price ?? updated.price,
+      });
+    } finally {
+      if (lockToken) {
+        await releaseLock(lockResource, lockToken).catch(() => {});
+      }
+    }
   }
 
   return {
@@ -140,7 +162,7 @@ export const rollbackLockedItems = async (
 };
 
 /**
- * 📝 Create a pending StockReservation record in MongoDB (default 15 minutes TTL)
+ * 📝 Create a pending StockReservation record in MongoDB & Redis (default 15 minutes TTL)
  */
 export const createStockReservationRecord = async (
   razorpayOrderId: string,
@@ -168,6 +190,44 @@ export const createStockReservationRecord = async (
   });
 
   await reservation.save(session ? { session } : {});
+
+  // ⚡ Synchronize temporary reservation hold to Redis with native TTL & ZSET index
+  if (isRedisReady()) {
+    const client = getRedisClient();
+    if (client) {
+      try {
+        const ttlSeconds = Math.max(60, ttlMinutes * 60);
+        const pipeline = client.pipeline();
+
+        // 1. Order-level reservation key with auto-expiry
+        const holdPayload = JSON.stringify({
+          razorpayOrderId,
+          userId: String(userId),
+          items,
+          expiresAt: expiresAt.getTime(),
+        });
+        pipeline.set(`stock_hold:order:${razorpayOrderId}`, holdPayload, "EX", ttlSeconds);
+
+        // 2. Product-level hold keys for instant cross-container stock checks
+        for (const it of items) {
+          pipeline.set(
+            `stock_hold:item:${String(it.productId)}:${razorpayOrderId}`,
+            String(it.quantity),
+            "EX",
+            ttlSeconds
+          );
+        }
+
+        // 3. Add to Redis Sorted Set for distributed timestamp-based expiration sweeping
+        pipeline.zadd("stock_reservations:expiring", expiresAt.getTime(), razorpayOrderId);
+
+        await pipeline.exec();
+      } catch (err: any) {
+        console.warn("⚠️ [StockReservation] Error syncing hold to Redis:", err.message);
+      }
+    }
+  }
+
   return reservation;
 };
 
@@ -222,6 +282,24 @@ export const commitStockReservation = async (
   reservation.committedAt = new Date();
   await reservation.save(session ? { session } : {});
 
+  // ⚡ Remove Redis hold keys and ZSET tracking
+  if (isRedisReady()) {
+    const client = getRedisClient();
+    if (client) {
+      try {
+        const pipeline = client.pipeline();
+        pipeline.del(`stock_hold:order:${razorpayOrderId}`);
+        for (const item of reservation.items) {
+          pipeline.del(`stock_hold:item:${String(item.productId)}:${razorpayOrderId}`);
+        }
+        pipeline.zrem("stock_reservations:expiring", razorpayOrderId);
+        await pipeline.exec();
+      } catch (err: any) {
+        console.warn("⚠️ [StockReservation] Error clearing Redis hold on commit:", err.message);
+      }
+    }
+  }
+
   return { success: true, status: "COMMITTED", reservation };
 };
 
@@ -265,90 +343,194 @@ export const releaseStockReservation = async (
   reservation.releaseReason = reason;
   await reservation.save(session ? { session } : {});
 
+  // ⚡ Remove Redis hold keys and ZSET tracking
+  if (isRedisReady()) {
+    const client = getRedisClient();
+    if (client) {
+      try {
+        const pipeline = client.pipeline();
+        pipeline.del(`stock_hold:order:${razorpayOrderId}`);
+        for (const item of reservation.items) {
+          pipeline.del(`stock_hold:item:${String(item.productId)}:${razorpayOrderId}`);
+        }
+        pipeline.zrem("stock_reservations:expiring", razorpayOrderId);
+        await pipeline.exec();
+      } catch (err: any) {
+        console.warn("⚠️ [StockReservation] Error clearing Redis hold on release:", err.message);
+      }
+    }
+  }
+
   return { success: true, reservation };
 };
 
 /**
- * 🧹 Sweep expired pending reservations and restore reservedStock to inventory
+ * 🧹 Sweep expired pending reservations across all distributed instances.
+ * Uses a distributed lock (Redlock pattern) so only ONE instance runs the sweep at any given time.
  */
-export const sweepExpiredReservations = async (): Promise<number> => {
-  const now = new Date();
-  const expiredList = await StockReservation.find({
-    status: "PENDING",
-    expiresAt: { $lte: now },
-  }).limit(50);
-
-  if (expiredList.length === 0) return 0;
-
-  let releasedCount = 0;
-  for (const res of expiredList) {
-    try {
-      const result = await releaseStockReservation(
-        res.razorpayOrderId,
-        "TTL_EXPIRED"
-      );
-      if (result.success) {
-        releasedCount++;
-        console.log(
-          `⏱️ [StockReservation] Released expired reservation for Razorpay Order: ${res.razorpayOrderId}`
-        );
-      }
-    } catch (err) {
-      console.error(
-        `🚨 [StockReservation] Failed to release expired reservation ${res.razorpayOrderId}:`,
-        err
-      );
-    }
+export const sweepExpiredReservationsDistributed = async (): Promise<number> => {
+  // Acquire distributed lock for sweeper (valid for 50s) to prevent concurrent sweeps across nodes
+  const lockToken = await acquireLock("worker:stock_reservation_sweeper", 50000);
+  if (!lockToken) {
+    // Another node is currently sweeping
+    return 0;
   }
 
-  return releasedCount;
+  let totalReleased = 0;
+  try {
+    const nowMs = Date.now();
+    const nowDate = new Date(nowMs);
+
+    // 1. Check Redis Sorted Set for reservations whose expiration timestamp <= now
+    if (isRedisReady()) {
+      const client = getRedisClient();
+      if (client) {
+        try {
+          const expiredOrderIds = await client.zrangebyscore(
+            "stock_reservations:expiring",
+            "-inf",
+            nowMs,
+            "LIMIT",
+            0,
+            50
+          );
+
+          if (expiredOrderIds && expiredOrderIds.length > 0) {
+            for (const orderId of expiredOrderIds) {
+              try {
+                const res = await releaseStockReservation(orderId, "TTL_EXPIRED");
+                if (res.success) {
+                  totalReleased++;
+                  console.log(`⏱️ [DistributedSweeper] Released expired reservation for Order: ${orderId}`);
+                }
+              } catch (err) {
+                console.error(`🚨 [DistributedSweeper] Error releasing expired order ${orderId}:`, err);
+              }
+            }
+          }
+        } catch (err: any) {
+          console.warn("⚠️ [DistributedSweeper] Redis ZSET query error:", err.message);
+        }
+      }
+    }
+
+    // 2. Safety reconciliation against MongoDB for any expired PENDING records
+    // (catches any records created during Redis downtime or missed events)
+    const expiredMongo = await StockReservation.find({
+      status: "PENDING",
+      expiresAt: { $lte: nowDate },
+    }).limit(50);
+
+    for (const res of expiredMongo) {
+      try {
+        const result = await releaseStockReservation(res.razorpayOrderId, "TTL_EXPIRED");
+        if (result.success) {
+          totalReleased++;
+          console.log(`⏱️ [DistributedSweeper] Reconciled expired MongoDB reservation: ${res.razorpayOrderId}`);
+        }
+      } catch (err) {
+        console.error(`🚨 [DistributedSweeper] Reconciliation error for ${res.razorpayOrderId}:`, err);
+      }
+    }
+  } finally {
+    await releaseLock("worker:stock_reservation_sweeper", lockToken).catch(() => {});
+  }
+
+  return totalReleased;
 };
 
-// Worker interval state
+// ======================================================================
+// 📡 4. REDIS KEYSPACE NOTIFICATION SUBSCRIBER (REAL-TIME EXPIRATION)
+// ======================================================================
+
+let keyspaceSubscribed = false;
+
+export const initKeyspaceSubscriber = async (): Promise<void> => {
+  if (keyspaceSubscribed || !isRedisReady()) return;
+
+  const subscriber = getRedisSubscriber();
+  if (!subscriber) return;
+
+  try {
+    const client = getRedisClient();
+    if (client) {
+      await client.config("SET", "notify-keyspace-events", "Ex").catch(() => {
+        // Some managed Redis providers block CONFIG command, which is safe to ignore
+      });
+    }
+
+    await subscriber.psubscribe("__keyevent@*__:expired");
+    keyspaceSubscribed = true;
+
+    subscriber.on("pmessage", async (_pattern, _channel, message) => {
+      // message is the expired key name, e.g. "stock_hold:order:order_xyz"
+      if (typeof message === "string" && message.startsWith("stock_hold:order:")) {
+        const razorpayOrderId = message.replace("stock_hold:order:", "");
+        // Use per-order lock so only one node releases this specific expired order
+        const orderLock = await acquireLock(`lock:expire:${razorpayOrderId}`, 15000);
+        if (orderLock) {
+          try {
+            await releaseStockReservation(razorpayOrderId, "TTL_EXPIRED");
+            console.log(`⚡ [KeyspaceEvent] Real-time restoration for expired reservation: ${razorpayOrderId}`);
+          } catch (err) {
+            console.error(`🚨 [KeyspaceEvent] Failed to release expired reservation ${razorpayOrderId}:`, err);
+          } finally {
+            await releaseLock(`lock:expire:${razorpayOrderId}`, orderLock).catch(() => {});
+          }
+        }
+      }
+    });
+
+    console.log("📡 [StockReservation] Redis keyspace expiration listener active.");
+  } catch (err: any) {
+    console.warn("⚠️ [StockReservation] Keyspace subscription not available:", err.message);
+  }
+};
+
+// ======================================================================
+// 🚀 5. DISTRIBUTED WORKER LIFECYCLE
+// ======================================================================
+
 let sweeperInterval: NodeJS.Timeout | null = null;
 let isSweeping = false;
 
-/**
- * 🚀 Start background worker to periodically sweep expired reservations
- */
-export const startStockReservationWorker = (intervalMs = 60000): void => {
-  if (sweeperInterval) {
-    console.log("ℹ️ [StockReservationWorker] Sweeper already running.");
-    return;
-  }
+export const initDistributedStockReservation = async (intervalMs = 60000): Promise<void> => {
+  // 1. Initialize keyspace notification listener for real-time expiry
+  await initKeyspaceSubscriber();
 
-  console.log(
-    `🚀 [StockReservationWorker] Starting sweeper background worker (Interval: ${intervalMs}ms)...`
-  );
+  // 2. Start distributed sweeper runner (synchronized via distributed lock)
+  if (sweeperInterval) return;
 
   sweeperInterval = setInterval(async () => {
     if (isSweeping) return;
     isSweeping = true;
     try {
-      const count = await sweepExpiredReservations();
+      const count = await sweepExpiredReservationsDistributed();
       if (count > 0) {
-        console.log(
-          `🧹 [StockReservationWorker] Swept ${count} expired reservation(s).`
-        );
+        console.log(`🧹 [DistributedSweeper] Swept ${count} expired reservation(s).`);
       }
-    } catch (error) {
-      console.error(
-        "🚨 [StockReservationWorker] Unhandled error during sweep:",
-        error
-      );
+    } catch (err) {
+      console.error("🚨 [DistributedSweeper] Unhandled sweeper error:", err);
     } finally {
       isSweeping = false;
     }
   }, intervalMs);
+
+  if (sweeperInterval.unref) {
+    sweeperInterval.unref();
+  }
 };
 
-/**
- * 🛑 Stop background worker cleanly
- */
-export const stopStockReservationWorker = (): void => {
+export const shutdownDistributedStockReservation = (): void => {
   if (sweeperInterval) {
     clearInterval(sweeperInterval);
     sweeperInterval = null;
-    console.log("🛑 [StockReservationWorker] Sweeper worker stopped.");
   }
+  keyspaceSubscribed = false;
+  console.log("🛑 [StockReservation] Distributed reservation worker stopped cleanly.");
 };
+
+// Export backward-compatible aliases
+export const startStockReservationWorker = initDistributedStockReservation;
+export const stopStockReservationWorker = shutdownDistributedStockReservation;
+export const sweepExpiredReservations = sweepExpiredReservationsDistributed;
