@@ -47,6 +47,10 @@ import User from "../models/userModel";
 import NurseryProfile from "../models/nurseryProfileModel";
 import Coupon from "../models/couponModel";
 import { verifyCouponInternal } from "./couponController";
+import {
+  checkCartItemsPincodeServiceability,
+  isPincodeServiceable,
+} from "../utils/pincodeService";
 
 interface AuthenticatedRequest extends Request {
   rawBody?: string;
@@ -60,7 +64,7 @@ export { getRazorpayInstance };
 // ======================================================================
 export const createRazorpayOrder = catchAsyncErrors(
   async (req: any, res: Response, next: NextFunction) => {
-    const { orderItems, couponCode, coupon } = req.body;
+    const { orderItems, couponCode, coupon, shippingInfo } = req.body;
 
     if (!orderItems || !Array.isArray(orderItems) || orderItems.length === 0) {
       return next(new ErrorHandler("Order items validation sequence mapping failed. Items array required.", 400));
@@ -131,6 +135,67 @@ export const createRazorpayOrder = catchAsyncErrors(
         discountPrice: dbProduct.discountPrice || 0,
         effectivePrice,
       });
+    }
+
+    // 🚚 PINCODE SERVICEABILITY VALIDATION ACROSS MULTI-VENDOR ITEMS
+    const rawDestinationPincode =
+      shippingInfo?.pinCode ||
+      shippingInfo?.pincode ||
+      req.body.shippingAddress?.pinCode ||
+      req.body.shippingAddress?.pincode ||
+      req.body.pincode ||
+      req.body.pinCode;
+
+    const destinationPincode = rawDestinationPincode
+      ? String(rawDestinationPincode).trim()
+      : "";
+
+    const uniqueNurseryIds = Array.from(
+      new Set(
+        authoritativeItems
+          .map((ai) => ai.product.nursery?.toString())
+          .filter((id): id is string => Boolean(id))
+      )
+    );
+
+    if (uniqueNurseryIds.length > 0) {
+      if (!destinationPincode || !/^[1-9][0-9]{5}$/.test(destinationPincode)) {
+        return res.status(400).json({
+          status: "fail",
+          message: "A valid 6-digit shipping pincode is required to verify delivery serviceability.",
+        });
+      }
+
+      const nurseryProfiles = await NurseryProfile.find({
+        nursery: { $in: uniqueNurseryIds },
+      }).lean();
+
+      const profileMap = new Map<string, any>();
+      for (const p of nurseryProfiles) {
+        if (p.nursery) {
+          profileMap.set(p.nursery.toString(), p);
+        }
+      }
+
+      const itemsToCheck = authoritativeItems.map((ai) => ({
+        productId: String(ai.product._id),
+        productName: ai.product.name,
+        nurseryId: ai.product.nursery ? ai.product.nursery.toString() : null,
+      }));
+
+      const serviceability = await checkCartItemsPincodeServiceability(
+        destinationPincode,
+        itemsToCheck,
+        profileMap
+      );
+
+      if (!serviceability.isServiceable) {
+        return res.status(400).json({
+          status: "fail",
+          message: "Delivery not available for some items at your pincode",
+          unserviceableItems: serviceability.unserviceableItems,
+        });
+      }
     }
 
     // 🛡️ 2. PAISE-LEVEL ZERO-FLOAT AUTHORITATIVE TOTALS WITH DYNAMIC GST
@@ -403,6 +468,67 @@ export const verifyPayment = catchAsyncErrors(
         message: "Order already verified and recorded.",
         order: existingOrder,
       });
+    }
+
+    // 🚚 PINCODE SERVICEABILITY VALIDATION ACROSS MULTI-VENDOR ITEMS
+    const rawDestinationPincode =
+      shippingInfo?.pinCode ||
+      shippingInfo?.pincode ||
+      req.body.shippingAddress?.pinCode ||
+      req.body.shippingAddress?.pincode ||
+      req.body.pincode ||
+      req.body.pinCode;
+
+    const destinationPincode = rawDestinationPincode
+      ? String(rawDestinationPincode).trim()
+      : "";
+
+    const uniqueNurseryIds = Array.from(
+      new Set(
+        dbProductsCache
+          .map((entry) => entry.dbProduct.nursery?.toString())
+          .filter((id): id is string => Boolean(id))
+      )
+    );
+
+    if (uniqueNurseryIds.length > 0) {
+      if (!destinationPincode || !/^[1-9][0-9]{5}$/.test(destinationPincode)) {
+        return res.status(400).json({
+          status: "fail",
+          message: "A valid 6-digit shipping pincode is required to verify delivery serviceability.",
+        });
+      }
+
+      const nurseryProfiles = await NurseryProfile.find({
+        nursery: { $in: uniqueNurseryIds },
+      }).lean();
+
+      const profileMap = new Map<string, any>();
+      for (const p of nurseryProfiles) {
+        if (p.nursery) {
+          profileMap.set(p.nursery.toString(), p);
+        }
+      }
+
+      const itemsToCheck = dbProductsCache.map((entry) => ({
+        productId: String(entry.dbProduct._id),
+        productName: entry.dbProduct.name,
+        nurseryId: entry.dbProduct.nursery ? entry.dbProduct.nursery.toString() : null,
+      }));
+
+      const serviceability = await checkCartItemsPincodeServiceability(
+        destinationPincode,
+        itemsToCheck,
+        profileMap
+      );
+
+      if (!serviceability.isServiceable) {
+        return res.status(400).json({
+          status: "fail",
+          message: "Delivery not available for some items at your pincode",
+          unserviceableItems: serviceability.unserviceableItems,
+        });
+      }
     }
 
     // Build verified items using itemTaxSnapshots

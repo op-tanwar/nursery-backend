@@ -49,6 +49,10 @@ import { commitStockReservation } from "../services/stockReservationService";
 import { processFallbackRefund } from "../services/fallbackRefundService";
 import { getActiveTaxMap } from "../utils/taxService";
 import { getEffectiveCommission } from "../utils/commissionService";
+import {
+  checkCartItemsPincodeServiceability,
+  isPincodeServiceable,
+} from "../utils/pincodeService";
 
 export { modelRegistry, getCaseInsensitiveModel, calculateServerShippingAndTax };
 
@@ -246,6 +250,67 @@ export const createNewOrder = catchAsyncErrors(
       reservation && reservation.status === "PENDING";
 
     if (!activeVerifiedOrder) {
+      // 🚚 PINCODE SERVICEABILITY VALIDATION ACROSS MULTI-VENDOR ITEMS
+      const rawDestinationPincode =
+        shippingInfo?.pinCode ||
+        shippingInfo?.pincode ||
+        req.body.shippingAddress?.pinCode ||
+        req.body.shippingAddress?.pincode ||
+        req.body.pincode ||
+        req.body.pinCode;
+
+      const destinationPincode = rawDestinationPincode
+        ? String(rawDestinationPincode).trim()
+        : "";
+
+      const uniqueNurseryIds = Array.from(
+        new Set(
+          dbProductsCache
+            .map((entry) => entry.dbProduct.nursery?.toString())
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+
+      if (uniqueNurseryIds.length > 0) {
+        if (!destinationPincode || !/^[1-9][0-9]{5}$/.test(destinationPincode)) {
+          return res.status(400).json({
+            status: "fail",
+            message: "A valid 6-digit shipping pincode is required to verify delivery serviceability.",
+          });
+        }
+
+        const nurseryProfiles = await NurseryProfile.find({
+          nursery: { $in: uniqueNurseryIds },
+        }).lean();
+
+        const profileMap = new Map<string, any>();
+        for (const p of nurseryProfiles) {
+          if (p.nursery) {
+            profileMap.set(p.nursery.toString(), p);
+          }
+        }
+
+        const itemsToCheck = dbProductsCache.map((entry) => ({
+          productId: String(entry.dbProduct._id),
+          productName: entry.dbProduct.name,
+          nurseryId: entry.dbProduct.nursery ? entry.dbProduct.nursery.toString() : null,
+        }));
+
+        const serviceability = await checkCartItemsPincodeServiceability(
+          destinationPincode,
+          itemsToCheck,
+          profileMap
+        );
+
+        if (!serviceability.isServiceable) {
+          return res.status(400).json({
+            status: "fail",
+            message: "Delivery not available for some items at your pincode",
+            unserviceableItems: serviceability.unserviceableItems,
+          });
+        }
+      }
+
       try {
         await withTransaction(async (session) => {
           const updateOpts = session ? { session } : {};

@@ -290,3 +290,217 @@ export const isIncompleteDeliveryCoverage = (
   }
   return false;
 };
+
+/**
+ * Checks whether buyerPincode is within maxDistanceKm of nurseryPincode.
+ * Returns true if both PINs are valid and the distance between their geo-coordinates <= maxDistanceKm.
+ * If both PINs are identical, immediately returns true (distance 0).
+ */
+export const isPincodeServiceable = async (
+  buyerPincode: string,
+  nurseryPincode: string,
+  maxDistanceKm: number = getServiceRadiusKm()
+): Promise<boolean> => {
+  try {
+    const normBuyer = normalizeIndianPincode(buyerPincode);
+    const normNursery = normalizeIndianPincode(nurseryPincode);
+
+    if (normBuyer === normNursery) {
+      return true;
+    }
+
+    const { lookup } = ensurePincodeIndex();
+    const buyerCoord = lookup.get(normBuyer);
+    const nurseryCoord = lookup.get(normNursery);
+
+    if (!buyerCoord || !nurseryCoord) {
+      return false;
+    }
+
+    const dist = calculateDistanceKm(
+      buyerCoord.lat,
+      buyerCoord.lng,
+      nurseryCoord.lat,
+      nurseryCoord.lng
+    );
+
+    const effectiveRadius =
+      Number.isFinite(maxDistanceKm) && maxDistanceKm > 0
+        ? maxDistanceKm
+        : getServiceRadiusKm();
+
+    return dist <= effectiveRadius;
+  } catch {
+    return false;
+  }
+};
+
+export interface NurseryServiceabilityProfile {
+  businessName?: string;
+  businessAddress?: { pinCode?: string };
+  deliveryPincodes?: string[];
+}
+
+export interface UnserviceableItemPayload {
+  productId: string;
+  productName: string;
+  nurseryName: string;
+  nurseryPincode: string;
+}
+
+/**
+ * Checks whether a single nursery profile can service the given buyer pincode.
+ * 1. Matches against profile.deliveryPincodes if available.
+ * 2. Checks Haversine distance between nursery base pincode and buyer pincode against maxDistanceKm.
+ */
+export const isNurseryServiceableToPincode = async (
+  buyerPincode: string,
+  profile: NurseryServiceabilityProfile,
+  maxDistanceKm: number = getServiceRadiusKm()
+): Promise<boolean> => {
+  try {
+    const normBuyer = normalizeIndianPincode(buyerPincode);
+
+    // 1. Direct match against nursery's deliveryPincodes array
+    if (
+      Array.isArray(profile.deliveryPincodes) &&
+      profile.deliveryPincodes.includes(normBuyer)
+    ) {
+      return true;
+    }
+
+    // 2. Haversine distance fallback between buyer pincode and nursery businessAddress.pinCode
+    const nurseryPin = profile.businessAddress?.pinCode?.trim();
+    if (nurseryPin && /^[1-9][0-9]{5}$/.test(nurseryPin)) {
+      if (normBuyer === nurseryPin) {
+        return true;
+      }
+      const isWithinRadius = await isPincodeServiceable(
+        normBuyer,
+        nurseryPin,
+        maxDistanceKm
+      );
+      if (isWithinRadius) {
+        return true;
+      }
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Validates a list of authoritative cart items against their respective nursery profiles for a destination pincode.
+ * Deduplicates nursery lookups and runs serviceability checks in parallel.
+ */
+export const checkCartItemsPincodeServiceability = async (
+  shippingPincode: string,
+  items: Array<{
+    productId: string;
+    productName: string;
+    nurseryId?: string | null;
+  }>,
+  nurseryProfilesMap: Map<string, NurseryServiceabilityProfile>,
+  maxDistanceKm: number = getServiceRadiusKm()
+): Promise<{
+  isServiceable: boolean;
+  unserviceableItems: UnserviceableItemPayload[];
+}> => {
+  const normShippingPin = String(shippingPincode || "").trim();
+  const isValidFormat = /^[1-9][0-9]{5}$/.test(normShippingPin);
+
+  // Deduplicate unique nursery IDs
+  const uniqueNurseryIds = Array.from(
+    new Set(
+      items
+        .map((i) => i.nurseryId)
+        .filter((id): id is string => Boolean(id))
+    )
+  );
+
+  // If no items belong to a specific nursery (e.g. platform products), cart is serviceable
+  if (uniqueNurseryIds.length === 0) {
+    return {
+      isServiceable: true,
+      unserviceableItems: [],
+    };
+  }
+
+  // If destination PIN format is invalid, all vendor items are immediately unserviceable
+  if (!isValidFormat) {
+    return {
+      isServiceable: false,
+      unserviceableItems: items
+        .filter((i) => Boolean(i.nurseryId))
+        .map((i) => ({
+          productId: i.productId,
+          productName: i.productName,
+          nurseryName:
+            (i.nurseryId && nurseryProfilesMap.get(i.nurseryId)?.businessName) ||
+            "Unknown Nursery",
+          nurseryPincode:
+            (i.nurseryId &&
+              nurseryProfilesMap.get(i.nurseryId)?.businessAddress?.pinCode) ||
+            "N/A",
+        })),
+    };
+  }
+
+  // Evaluate each unique nursery in parallel
+  const nurseryServiceability = new Map<
+    string,
+    { isServiceable: boolean; nurseryName: string; nurseryPincode: string }
+  >();
+
+  await Promise.all(
+    uniqueNurseryIds.map(async (nurseryId) => {
+      const profile = nurseryProfilesMap.get(nurseryId);
+      const nurseryName = profile?.businessName || "Unknown Nursery";
+      const nurseryPincode = profile?.businessAddress?.pinCode || "N/A";
+
+      if (!profile) {
+        nurseryServiceability.set(nurseryId, {
+          isServiceable: false,
+          nurseryName,
+          nurseryPincode,
+        });
+        return;
+      }
+
+      const serviceable = await isNurseryServiceableToPincode(
+        normShippingPin,
+        profile,
+        maxDistanceKm
+      );
+
+      nurseryServiceability.set(nurseryId, {
+        isServiceable: serviceable,
+        nurseryName,
+        nurseryPincode,
+      });
+    })
+  );
+
+  const unserviceableItems: UnserviceableItemPayload[] = [];
+
+  for (const item of items) {
+    if (!item.nurseryId) continue;
+    const status = nurseryServiceability.get(item.nurseryId);
+    if (!status || !status.isServiceable) {
+      unserviceableItems.push({
+        productId: item.productId,
+        productName: item.productName,
+        nurseryName: status?.nurseryName || "Unknown Nursery",
+        nurseryPincode: status?.nurseryPincode || "N/A",
+      });
+    }
+  }
+
+  return {
+    isServiceable: unserviceableItems.length === 0,
+    unserviceableItems,
+  };
+};
+
