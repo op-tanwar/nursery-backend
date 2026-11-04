@@ -23,21 +23,43 @@ import cacheManager from "../utils/cacheManager";
 export const ACTIVE_NURSERIES_CACHE_KEY = "nurseries:active_ids_list";
 
 /**
- * ⚡ Fetch cached active and approved nursery user IDs
+ * ⚡ Fetch cached active and approved nursery user and profile IDs
+ * Returns both NurseryProfile._id and User._id strings for complete consistency
+ * across product references and user accounts.
  */
 export const getActiveNurseryIds = async (): Promise<string[]> => {
   return cacheManager.getOrSet(
     ACTIVE_NURSERIES_CACHE_KEY,
     async () => {
+      // 1. Fetch active profiles (excluding explicitly rejected or deactivated profiles)
       const activeNurseries = await NurseryProfile.find({
-        isActive: true,
-        approvalStatus: "Approved",
+        isActive: { $ne: false },
+        approvalStatus: { $ne: "Rejected" },
       })
-        .select("nursery")
+        .select("nursery _id")
         .lean();
-      return activeNurseries
-        .map((n) => (n.nursery ? n.nursery.toString() : ""))
-        .filter(Boolean);
+
+      const ids = new Set<string>();
+      activeNurseries.forEach((n) => {
+        if (n._id) ids.add(n._id.toString());
+        if (n.nursery) ids.add(n.nursery.toString());
+      });
+
+      // 2. Fetch active users with nursery vendor role
+      const activeUsers = await User.find({
+        role: "nursery",
+        isActive: { $ne: false },
+        isBlocked: { $ne: true },
+        status: { $nin: ["Blocked", "Suspended"] },
+      })
+        .select("_id")
+        .lean();
+
+      activeUsers.forEach((u) => {
+        if (u._id) ids.add(u._id.toString());
+      });
+
+      return Array.from(ids);
     },
     300 // 5 Minutes TTL
   );
@@ -108,8 +130,13 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
   const [activeNurseryIds, nurseryProfiles, nurseryUsers] = await Promise.all([
     getActiveNurseryIds(),
     uniqueNurseryIds.length > 0
-      ? NurseryProfile.find({ nursery: { $in: uniqueNurseryIds as any } })
-          .select("nursery isActive approvalStatus businessName")
+      ? NurseryProfile.find({
+          $or: [
+            { nursery: { $in: uniqueNurseryIds as any } },
+            { _id: { $in: uniqueNurseryIds as any } },
+          ],
+        })
+          .select("nursery _id isActive approvalStatus businessName")
           .lean()
       : [],
     uniqueNurseryIds.length > 0
@@ -124,6 +151,9 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
     if (np.nursery) {
       profileMap.set(np.nursery.toString(), np);
     }
+    if (np._id) {
+      profileMap.set(np._id.toString(), np);
+    }
   }
 
   const userMap = new Map<string, any>();
@@ -137,7 +167,8 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
       return false;
     }
     const profile = profileMap.get(nurseryId);
-    const userDoc = userMap.get(nurseryId);
+    const userId = profile?.nursery ? profile.nursery.toString() : nurseryId;
+    const userDoc = userMap.get(userId);
 
     if (profile && profile.isActive === false) {
       return false;

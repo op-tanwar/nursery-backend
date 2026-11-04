@@ -14,7 +14,22 @@ import ApiFeatures from "../utils/apiFeatures";
 import cacheManager from "../utils/cacheManager";
 import { resolveSlugOrRedirect } from "../utils/slugify";
 import { uploadToCloudinary, deleteFromCloudinary } from "../utils/uploadHelper";
-import { getActiveNurseryIds } from "./cartController";
+import { getActiveNurseryIds, ACTIVE_NURSERIES_CACHE_KEY } from "./cartController";
+
+/**
+ * 🔒 Strict ownership verification helper
+ * Supports both direct User._id and related NurseryProfile._id
+ */
+const isProductOwner = async (productNursery: any, user: any): Promise<boolean> => {
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  const nurseryStr = productNursery?.toString();
+  if (!nurseryStr) return false;
+  if (nurseryStr === user._id.toString()) return true;
+  const profile = await NurseryProfile.findOne({ nursery: user._id }).select("_id").lean();
+  if (profile && nurseryStr === profile._id.toString()) return true;
+  return false;
+};
 
 // ======================================================================
 // 🛡️ 1. ZOD VALIDATION SCHEMAS FOR POLYMORPHIC ATTRIBUTES
@@ -383,9 +398,10 @@ export const createProduct = catchAsyncErrors(
       attributes: validatedAttributes,
     });
 
-    // Invalidate product catalog cache
+    // Invalidate product catalog and active nursery cache
     await cacheManager.invalidatePattern("catalog:");
     await cacheManager.invalidatePattern("products:");
+    await cacheManager.del(ACTIVE_NURSERIES_CACHE_KEY);
 
     res.status(201).json({
       success: true,
@@ -415,7 +431,16 @@ export const getAllProducts = catchAsyncErrors(
         ? Math.min(Math.floor(requestedLimit), 48)
         : 12;
 
-    const { category, nursery, vendor, isPublished, minPrice, maxPrice, ...otherQueries } = req.query;
+    const {
+      category,
+      nursery,
+      vendor,
+      isPublished,
+      minPrice,
+      maxPrice,
+      subCategory,
+      ...otherQueries
+    } = req.query;
 
     const baseFilter: any = {};
 
@@ -423,7 +448,8 @@ export const getAllProducts = catchAsyncErrors(
     if (isPublished !== undefined) {
       baseFilter.isPublished = String(isPublished) === "true";
     } else if (req.user?.role !== "admin") {
-      baseFilter.isPublished = true;
+      baseFilter.isPublished = { $ne: false };
+      baseFilter.isActive = { $ne: false };
     }
 
     const normCategory = normalizeCategory(category);
@@ -431,14 +457,43 @@ export const getAllProducts = catchAsyncErrors(
       baseFilter.category = normCategory;
     }
 
+    // Subcategory matching (matches attributes.subCategory or tags)
+    if (subCategory && typeof subCategory === "string" && subCategory.trim() !== "" && subCategory !== "All") {
+      const cleanSub = subCategory.trim();
+      const escapedSub = cleanSub.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const subRegex = new RegExp(`^${escapedSub}$`, "i");
+      baseFilter.$or = [
+        { "attributes.subCategory": subRegex },
+        { tags: subRegex },
+      ];
+    }
+
     // Vendor / Nursery filter
     const targetNursery = nursery || vendor;
-    if (targetNursery) {
-      baseFilter.nursery = targetNursery;
+    if (targetNursery && typeof targetNursery === "string") {
+      const relatedProfile = await NurseryProfile.findOne({
+        $or: [
+          { _id: mongoose.isValidObjectId(targetNursery) ? targetNursery : null },
+          { nursery: mongoose.isValidObjectId(targetNursery) ? targetNursery : null },
+          { slug: targetNursery },
+        ],
+      })
+        .select("_id nursery")
+        .lean();
+
+      if (relatedProfile) {
+        const nurseryIds = [
+          relatedProfile._id.toString(),
+          relatedProfile.nursery ? relatedProfile.nursery.toString() : "",
+        ].filter(Boolean);
+        baseFilter.nursery = { $in: nurseryIds };
+      } else {
+        baseFilter.nursery = targetNursery;
+      }
     } else if (req.user?.role !== "admin") {
       // Filter out products from inactive / suspended nurseries using fast Redis cache
       const activeNurseryIds = await getActiveNurseryIds();
-      if (activeNurseryIds.length > 0) {
+      if (activeNurseryIds && activeNurseryIds.length > 0) {
         baseFilter.nursery = { $in: activeNurseryIds };
       }
     }
@@ -557,11 +612,8 @@ export const updateProduct = catchAsyncErrors(
     if (!product) return next(new ErrorHandler("Product not found.", 404));
 
     // Strict Ownership verification: Only super-admin or product's nursery vendor can update
-    const isOwner =
-      product.nursery.toString() === user._id.toString() ||
-      product.nursery.toString() === (user as any).nurseryProfile?.toString();
-
-    if (user.role !== "admin" && !isOwner) {
+    const isOwner = await isProductOwner(product.nursery, user);
+    if (!isOwner) {
       return next(new ErrorHandler("You do not have permission to modify this product.", 403));
     }
 
@@ -684,11 +736,8 @@ export const deleteProduct = catchAsyncErrors(
     if (!product) return next(new ErrorHandler("Product not found.", 404));
 
     // Ownership check
-    const isOwner =
-      product.nursery.toString() === user._id.toString() ||
-      product.nursery.toString() === (user as any).nurseryProfile?.toString();
-
-    if (user.role !== "admin" && !isOwner) {
+    const isOwner = await isProductOwner(product.nursery, user);
+    if (!isOwner) {
       return next(new ErrorHandler("You do not have permission to delete this product.", 403));
     }
 
@@ -722,9 +771,24 @@ export const getNurseryProducts = catchAsyncErrors(
     const { nurseryId } = req.params;
     const isOwner = req.user && (req.user._id.toString() === nurseryId || req.user.role === "admin");
 
-    const filter: any = { nursery: nurseryId };
+    const relatedProfile = await NurseryProfile.findOne({
+      $or: [
+        { _id: mongoose.isValidObjectId(nurseryId) ? nurseryId : null },
+        { nursery: mongoose.isValidObjectId(nurseryId) ? nurseryId : null },
+        { slug: nurseryId },
+      ],
+    })
+      .select("_id nursery")
+      .lean();
+
+    const nurseryIds = relatedProfile
+      ? [relatedProfile._id.toString(), relatedProfile.nursery ? relatedProfile.nursery.toString() : ""].filter(Boolean)
+      : [nurseryId];
+
+    const filter: any = { nursery: { $in: nurseryIds } };
     if (!isOwner) {
-      filter.isPublished = true;
+      filter.isPublished = { $ne: false };
+      filter.isActive = { $ne: false };
     }
 
     const products = await Product.find(filter).sort("-createdAt").lean();
@@ -743,9 +807,17 @@ export const getNurseryProducts = catchAsyncErrors(
  */
 export const getMyNurseryProducts = catchAsyncErrors(
   async (req: Request, res: Response, _next: NextFunction) => {
-    const nurseryId = req.user?._id;
+    const userId = req.user?._id;
+    if (!userId) {
+      res.status(200).json({ success: true, count: 0, products: [] });
+      return;
+    }
+
+    const profile = await NurseryProfile.findOne({ nursery: userId }).select("_id").lean();
+    const nurseryIds = [userId.toString(), profile?._id ? profile._id.toString() : ""].filter(Boolean);
+
     const { category } = req.query;
-    const filter: any = { nursery: nurseryId };
+    const filter: any = { nursery: { $in: nurseryIds } };
     if (category) {
       const norm = normalizeCategory(category);
       if (norm) filter.category = norm;
@@ -881,10 +953,8 @@ export const toggleProductStatus = catchAsyncErrors(
     const product = await Product.findById(id);
     if (!product) return next(new ErrorHandler("Product not found.", 404));
 
-    if (
-      user?.role !== "admin" &&
-      product.nursery.toString() !== user?._id.toString()
-    ) {
+    const isOwner = await isProductOwner(product.nursery, user);
+    if (!isOwner) {
       return next(new ErrorHandler("Forbidden.", 403));
     }
 
