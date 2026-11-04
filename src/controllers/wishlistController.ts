@@ -6,6 +6,7 @@ import NurseryProfile from "../models/nurseryProfileModel";
 import { findProductAndModel } from "../utils/productRegistry";
 import { IWishlistDocument } from "../types/cartWishlist.types";
 import cacheManager from "../utils/cacheManager";
+import { getActiveNurseryIds, ACTIVE_NURSERIES_CACHE_KEY } from "./cartController";
 
 // 💚 1. TOGGLE WISHLIST ITEM
 export const toggleWishlistItem = catchAsyncErrors(
@@ -74,14 +75,7 @@ export const getMyWishlist = catchAsyncErrors(
       wishlist = await Wishlist.create({ user: req.user?._id, items: [] });
     } else if (wishlist.items.length > 0) {
       // 🛑 सुरक्षा चेक: ब्लॉक की गई नर्सरी के प्रोडक्ट्स को विशलिस्ट ग्रिड से ऑटो-फिल्टर करें (Cached for performance)
-      const activeNurseryIds = await cacheManager.getOrSet(
-        "nurseries:active_ids_list",
-        async () => {
-          const activeNurseries = await NurseryProfile.find({ isActive: true }).select("nursery").lean();
-          return activeNurseries.map((n) => n.nursery.toString());
-        },
-        300
-      );
+      const activeNurseryIds = await getActiveNurseryIds();
 
       const originalLength = wishlist.items.length;
       wishlist.items = wishlist.items.filter((item: any) => {

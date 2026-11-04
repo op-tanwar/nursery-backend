@@ -12,23 +12,11 @@ import Order from "../models/orderModel";
 import { getPluralKey, getSingularKey, getTotalCountKey } from "../utils/productRegistry";
 import cacheManager from "../utils/cacheManager";
 import { resolveSlugOrRedirect } from "../utils/slugify";
+import { getActiveNurseryIds } from "./cartController";
 
-// ⚡ High-speed in-memory cache for active nursery IDs
+// ⚡ High-speed cache for active nursery IDs
 const getCachedActiveNurseryIds = async (): Promise<string[]> => {
-  return cacheManager.getOrSet(
-    "nurseries:active_ids",
-    async () => {
-      const activeNurseries = await NurseryProfile.find({
-        isActive: true,
-        approvalStatus: "Approved",
-      })
-        .select("nursery")
-        .lean();
-
-      return activeNurseries.map((n) => n.nursery.toString());
-    },
-    300 // 5 Minutes TTL
-  );
+  return getActiveNurseryIds();
 };
 
 // Helper to normalize express-fileupload single/array input

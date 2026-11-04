@@ -14,6 +14,65 @@ import {
 import cacheManager from "../utils/cacheManager";
 
 // ======================================================================
+// ⚡ CENTRALIZED CACHE CONSTANTS & INVALIDATION UTILITIES
+// ======================================================================
+
+/**
+ * Global cache key for active nursery vendor user IDs (5-minute TTL)
+ */
+export const ACTIVE_NURSERIES_CACHE_KEY = "nurseries:active_ids_list";
+
+/**
+ * ⚡ Fetch cached active and approved nursery user IDs
+ */
+export const getActiveNurseryIds = async (): Promise<string[]> => {
+  return cacheManager.getOrSet(
+    ACTIVE_NURSERIES_CACHE_KEY,
+    async () => {
+      const activeNurseries = await NurseryProfile.find({
+        isActive: true,
+        approvalStatus: "Approved",
+      })
+        .select("nursery")
+        .lean();
+      return activeNurseries
+        .map((n) => (n.nursery ? n.nursery.toString() : ""))
+        .filter(Boolean);
+    },
+    300 // 5 Minutes TTL
+  );
+};
+
+/**
+ * 🧹 Invalidate all active nursery ID caches and nursery-specific profile caches
+ * Clears both exact keys and pattern namespaces (nurseries:* and nursery:*)
+ */
+export const invalidateNurseryCache = async (nurseryId?: string): Promise<void> => {
+  const keysToDelete = [
+    ACTIVE_NURSERIES_CACHE_KEY,
+    "nurseries:active_ids",
+  ];
+
+  if (nurseryId) {
+    const idStr = nurseryId.toString();
+    keysToDelete.push(
+      `nursery:${idStr}`,
+      `nursery_profile:${idStr}`,
+      `pname:nursery:${idStr}`
+    );
+  }
+
+  await Promise.all(keysToDelete.map((key) => cacheManager.del(key)));
+
+  await Promise.all([
+    cacheManager.invalidatePattern("nurseries:"),
+    nurseryId
+      ? cacheManager.invalidatePattern(`nursery:${nurseryId}:`)
+      : cacheManager.invalidatePattern("nursery:"),
+  ]);
+};
+
+// ======================================================================
 // 🛡️ DYNAMIC AVAILABILITY ENRICHMENT & VALIDATION HELPERS
 // ======================================================================
 
@@ -45,8 +104,9 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
     )
   );
 
-  // 2. Fetch nursery profiles & user statuses in parallel
-  const [nurseryProfiles, nurseryUsers] = await Promise.all([
+  // 2. Fetch cached active nursery IDs, nursery profiles, & user statuses in parallel
+  const [activeNurseryIds, nurseryProfiles, nurseryUsers] = await Promise.all([
+    getActiveNurseryIds(),
     uniqueNurseryIds.length > 0
       ? NurseryProfile.find({ nursery: { $in: uniqueNurseryIds as any } })
           .select("nursery isActive approvalStatus businessName")
@@ -73,6 +133,9 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
 
   const isNurseryActive = (nurseryId?: string | null): boolean => {
     if (!nurseryId) return true; // Direct platform product
+    if (!activeNurseryIds.includes(nurseryId)) {
+      return false;
+    }
     const profile = profileMap.get(nurseryId);
     const userDoc = userMap.get(nurseryId);
 
@@ -199,9 +262,11 @@ export const addToCart = catchAsyncErrors(
     }
 
     // 🛑 सुरक्षा चेक: चेक करें कि क्या इस प्रोडक्ट की नर्सरी एक्टिव है
-    const nurseryProfile = await NurseryProfile.findOne({ nursery: product.nursery });
-    if (nurseryProfile && !nurseryProfile.isActive) {
-      return next(new ErrorHandler("This nursery is temporarily blocked by admin. Cannot add product.", 400));
+    if (product.nursery) {
+      const activeNurseryIds = await getActiveNurseryIds();
+      if (!activeNurseryIds.includes(product.nursery.toString())) {
+        return next(new ErrorHandler("This nursery is temporarily blocked by admin. Cannot add product.", 400));
+      }
     }
 
     let cart = await Cart.findOne({ user: userId }) as ICartDocument | null;
@@ -256,9 +321,11 @@ export const updateCartQuantity = catchAsyncErrors(
     if (!product) return next(new ErrorHandler("Product not found", 404));
 
     // 🛑 सुरक्षा चेक: ब्लॉक की गई नर्सरी की क्वांटिटी अपडेट न करने दें
-    const nurseryProfile = await NurseryProfile.findOne({ nursery: product.nursery });
-    if (nurseryProfile && !nurseryProfile.isActive) {
-      return next(new ErrorHandler("This product is currently unavailable due to nursery suspension.", 400));
+    if (product.nursery) {
+      const activeNurseryIds = await getActiveNurseryIds();
+      if (!activeNurseryIds.includes(product.nursery.toString())) {
+        return next(new ErrorHandler("This product is currently unavailable due to nursery suspension.", 400));
+      }
     }
 
     if (product.stock < quantity) {

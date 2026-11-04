@@ -42,6 +42,7 @@ import {
   clearCommissionCache,
   DEFAULT_CATEGORY_COMMISSIONS,
 } from "../utils/commissionService";
+import { invalidateNurseryCache, ACTIVE_NURSERIES_CACHE_KEY } from "./cartController";
 
 
 const resolveDeliveryPincodes = (pinCode: string): string[] => {
@@ -243,6 +244,7 @@ export const updateNurseryProfileDetails = catchAsyncErrors(
     }
 
     await profile.save();
+    await invalidateNurseryCache(profile.nursery.toString());
 
     const radiusKm = getServiceRadiusKm();
 
@@ -298,6 +300,7 @@ export const getMyNurseryProfile = catchAsyncErrors(
           profile.set("deliveryPincodes", refreshed);
           profile.markModified("deliveryPincodes");
           await profile.save();
+    await invalidateNurseryCache(profile.nursery.toString());
           console.log(
             `[nurseryProfile] Backfilled deliveryPincodes for ${profile._id}: ${refreshed.length} PINs`
           );
@@ -358,6 +361,7 @@ export const reviewNurseryApplication = catchAsyncErrors(
     }
 
     await profile.save();
+    await invalidateNurseryCache(profile.nursery.toString());
 
     // 📧 Non-blocking: Notify nursery vendor of application decision
     const nurseryUser = await User.findById(profile.nursery).select("name email").lean();
@@ -458,6 +462,9 @@ export const toggleNurseryStatus = catchAsyncErrors(
         new ErrorHandler("Nursery profile structural record matrix not found for this vendor.", 404)
       );
     }
+
+    // ⚡ Invalidate active nurseries cache and vendor-specific profile caches immediately
+    await invalidateNurseryCache(targetUserId.toString());
 
     res.status(200).json({
       success: true,
@@ -1112,6 +1119,7 @@ export const uploadNurseryDocuments = catchAsyncErrors(
     profile.markModified("documents");
 
     await profile.save();
+    await invalidateNurseryCache(profile.nursery.toString());
 
     return res.status(200).json({
       success: true,
@@ -1299,6 +1307,7 @@ export const verifyNurseryDocuments = catchAsyncErrors(
 
     profile.markModified("documents");
     await profile.save();
+    await invalidateNurseryCache(profile.nursery.toString());
 
     // 📧 Non-blocking: Notify nursery vendor of verification & approval decision
     if (profile.verificationStatus === "Approved" || profile.verificationStatus === "Rejected") {
@@ -1376,6 +1385,7 @@ export const manageNurseryServicePincodes = catchAsyncErrors(
         { $addToSet: { deliveryPincodes: normalized } },
         { new: true, runValidators: true }
       );
+      await invalidateNurseryCache(profile.nursery.toString());
       return res.status(200).json({
         success: true,
         message: `Pincode ${normalized} added to service coverage.`,
@@ -1393,6 +1403,7 @@ export const manageNurseryServicePincodes = catchAsyncErrors(
         { $pull: { deliveryPincodes: normalized } },
         { new: true, runValidators: true }
       );
+      await invalidateNurseryCache(profile.nursery.toString());
       return res.status(200).json({
         success: true,
         message: `Pincode ${normalized} removed from service coverage.`,
@@ -1421,6 +1432,7 @@ export const manageNurseryServicePincodes = catchAsyncErrors(
         { $set: { deliveryPincodes: uniquePins } },
         { new: true, runValidators: true }
       );
+      await invalidateNurseryCache(profile.nursery.toString());
       return res.status(200).json({
         success: true,
         message: `Service pincodes updated. Total: ${updated?.deliveryPincodes?.length || 0}`,
@@ -1584,6 +1596,7 @@ export const updateNurseryCommission = catchAsyncErrors(
     }
 
     await profile.save();
+    await invalidateNurseryCache(profile.nursery.toString());
     clearCommissionCache();
 
     // Generate fresh breakdown
