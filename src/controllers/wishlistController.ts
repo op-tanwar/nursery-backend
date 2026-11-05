@@ -22,9 +22,11 @@ export const toggleWishlistItem = catchAsyncErrors(
     }
 
     // 🛑 सुरक्षा चेक: अगर नर्सरी ब्लॉक है, तो यूजर इसे अपनी विशलिस्ट में नहीं जोड़ सकता
-    const nurseryProfile = await NurseryProfile.findOne({ nursery: product.nursery });
-    if (nurseryProfile && !nurseryProfile.isActive) {
-      return next(new ErrorHandler("This product is currently unavailable as the nursery is blocked.", 400));
+    if (product.nursery) {
+      const activeNurseryIds = await getActiveNurseryIds();
+      if (!activeNurseryIds.includes(product.nursery.toString())) {
+        return next(new ErrorHandler("This product is currently unavailable as the nursery is blocked.", 400));
+      }
     }
 
     let wishlist = await Wishlist.findOne({ user: userId }) as IWishlistDocument | null;
@@ -37,7 +39,7 @@ export const toggleWishlistItem = catchAsyncErrors(
 
       const populatedWishlist = await Wishlist.findById(newWishlist._id).populate({
         path: "items.product",
-        select: "name price images coverImage stock slug nursery"
+        select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished"
       });
 
       return res.status(200).json({ success: true, message: "Added to wishlist", wishlist: populatedWishlist });
@@ -55,7 +57,7 @@ export const toggleWishlistItem = catchAsyncErrors(
 
     const populatedWishlist = await Wishlist.findById(wishlist._id).populate({
       path: "items.product",
-      select: "name price images coverImage stock slug nursery"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished"
     });
 
     const message = itemIndex > -1 ? "Removed from wishlist" : "Added to wishlist";
@@ -68,7 +70,7 @@ export const getMyWishlist = catchAsyncErrors(
   async (req: Request, res: Response, next: NextFunction) => {
     let wishlist = await Wishlist.findOne({ user: req.user?._id }).populate({
       path: "items.product",
-      select: "name price images coverImage stock slug nursery"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished"
     });
 
     if (!wishlist) {

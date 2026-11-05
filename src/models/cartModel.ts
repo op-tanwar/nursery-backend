@@ -29,7 +29,7 @@ const cartSchema = new Schema<ICartDocument>(
         nursery: {
           type: Schema.Types.ObjectId,
           ref: "User",
-          required: true,
+          required: false,
         },
       },
     ],

@@ -197,17 +197,23 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
     let isAvailable = true;
     let unavailableReason: UnavailableReason | undefined = undefined;
 
-    if (!product || product.isActive === false) {
+    const nurseryId = rawItem.nursery?.toString() || product?.nursery?.toString();
+    const profile = profileMap.get(nurseryId);
+    const nurseryName = profile?.businessName || "Urban Nursery";
+
+    if (!product || product.isActive === false || product.isPublished === false) {
       isAvailable = false;
       unavailableReason = "PRODUCT_DISABLED";
     } else {
-      const nurseryId = rawItem.nursery?.toString() || product.nursery?.toString();
       if (!isNurseryActive(nurseryId)) {
         isAvailable = false;
         unavailableReason = "NURSERY_INACTIVE";
-      } else if (typeof product.stock === "number" && product.stock <= 0) {
-        isAvailable = false;
-        unavailableReason = "OUT_OF_STOCK";
+      } else {
+        const availableStock = Math.max(0, (product.stock || 0) - (product.reservedStock || 0));
+        if (availableStock <= 0) {
+          isAvailable = false;
+          unavailableReason = "OUT_OF_STOCK";
+        }
       }
     }
 
@@ -224,6 +230,7 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
 
     return {
       ...rawItem,
+      nurseryName,
       isAvailable,
       unavailableReason,
     };
@@ -302,9 +309,11 @@ export const addToCart = catchAsyncErrors(
 
     let cart = await Cart.findOne({ user: userId }) as ICartDocument | null;
 
+    const availableStock = Math.max(0, (product.stock || 0) - (product.reservedStock || 0));
+
     if (!cart) {
-      if (product.stock < quantity) {
-        return next(new ErrorHandler(`Only ${product.stock} units available`, 400));
+      if (availableStock < quantity) {
+        return next(new ErrorHandler(`Only ${availableStock} units available in stock`, 400));
       }
       cart = await Cart.create({
         user: userId,
@@ -315,13 +324,13 @@ export const addToCart = catchAsyncErrors(
 
       if (itemIndex > -1) {
         const cumulativeQuantity = cart.items[itemIndex].quantity + quantity;
-        if (product.stock < cumulativeQuantity) {
-          return next(new ErrorHandler(`Max stock limit is ${product.stock}`, 400));
+        if (availableStock < cumulativeQuantity) {
+          return next(new ErrorHandler(`Max available stock limit is ${availableStock}`, 400));
         }
         cart.items[itemIndex].quantity = cumulativeQuantity;
       } else {
-        if (product.stock < quantity) {
-          return next(new ErrorHandler(`Only ${product.stock} units available`, 400));
+        if (availableStock < quantity) {
+          return next(new ErrorHandler(`Only ${availableStock} units available in stock`, 400));
         }
         cart.items.push({ product: productId, itemModel: "Product", quantity, nursery: product.nursery });
       }
@@ -330,7 +339,7 @@ export const addToCart = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery isActive category"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
     });
 
     const enrichedCart = await enrichCartWithAvailability(updatedCart);
@@ -359,8 +368,9 @@ export const updateCartQuantity = catchAsyncErrors(
       }
     }
 
-    if (product.stock < quantity) {
-      return next(new ErrorHandler(`Only ${product.stock} units available in stock`, 400));
+    const availableStock = Math.max(0, (product.stock || 0) - (product.reservedStock || 0));
+    if (availableStock < quantity) {
+      return next(new ErrorHandler(`Only ${availableStock} units available in stock`, 400));
     }
 
     const cart = await Cart.findOne({ user: userId }) as ICartDocument | null;
@@ -374,7 +384,7 @@ export const updateCartQuantity = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery isActive category"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
     });
 
     const enrichedCart = await enrichCartWithAvailability(updatedCart);
@@ -387,7 +397,7 @@ export const getMyCart = catchAsyncErrors(
   async (req: Request, res: Response, next: NextFunction) => {
     let cart = await Cart.findOne({ user: req.user?._id }).populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery isActive category"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
     });
 
     if (!cart) {
@@ -422,7 +432,7 @@ export const removeFromCart = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery isActive category"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
     });
 
     const enrichedCart = await enrichCartWithAvailability(updatedCart);
@@ -459,11 +469,13 @@ export const syncCart = catchAsyncErrors(
         (item) => item.product && item.product.toString() === prodId
       );
 
+      const availableStock = Math.max(0, (product.stock || 0) - (product.reservedStock || 0));
+
       if (itemIndex > -1) {
         const targetQty = cart.items[itemIndex].quantity + requestedQty;
-        cart.items[itemIndex].quantity = targetQty <= product.stock ? targetQty : product.stock;
+        cart.items[itemIndex].quantity = targetQty <= availableStock ? targetQty : availableStock;
       } else {
-        const targetQty = requestedQty <= product.stock ? requestedQty : product.stock;
+        const targetQty = requestedQty <= availableStock ? requestedQty : availableStock;
         if (targetQty > 0) {
           cart.items.push({
             product: prodId as any,
@@ -478,7 +490,7 @@ export const syncCart = catchAsyncErrors(
     await cart.save();
     const syncedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock slug nursery isActive category"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
     });
 
     const enrichedCart = await enrichCartWithAvailability(syncedCart);

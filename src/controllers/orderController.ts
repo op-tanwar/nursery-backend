@@ -333,8 +333,20 @@ export const myOrders = catchAsyncErrors(async (req: Request, res: Response) => 
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(resPerPage)
-      .lean(),
+      .lean<any[]>(),
   ]);
+
+  const enrichedOrders = orders.map((order: any) => ({
+    ...order,
+    orderItems: (order.orderItems || []).map((oi: any) => {
+      const productDoc = oi.item || oi.product || {};
+      return {
+        ...oi,
+        item: productDoc,
+        product: productDoc,
+      };
+    }),
+  }));
 
   res.status(200).json({
     success: true,
@@ -342,7 +354,7 @@ export const myOrders = catchAsyncErrors(async (req: Request, res: Response) => 
     resPerPage,
     currentPage,
     totalPages: Math.ceil(totalOrdersCount / resPerPage),
-    orders
+    orders: enrichedOrders
   });
 });
 
@@ -360,18 +372,31 @@ export const getAllOrders = catchAsyncErrors(async (req: Request, res: Response)
     Order.countDocuments(),
     Order.find()
       .populate("user", "name email")
+      .populate("orderItems.item")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .lean(),
+      .lean<any[]>(),
   ]);
+
+  const enrichedOrders = orders.map((order: any) => ({
+    ...order,
+    orderItems: (order.orderItems || []).map((oi: any) => {
+      const productDoc = oi.item || oi.product || {};
+      return {
+        ...oi,
+        item: productDoc,
+        product: productDoc,
+      };
+    }),
+  }));
 
   res.status(200).json({
     success: true,
     totalOrdersCount,
     page,
     limit,
-    orders,
+    orders: enrichedOrders,
   });
 });
 
@@ -379,18 +404,26 @@ export const getAllOrders = catchAsyncErrors(async (req: Request, res: Response)
 // 🏡 5. NURSERY — VENDOR-SPECIFIC ORDERS (WITH DB PAGINATION ACCELERATION)
 // ======================================================================
 export const getMyNurseryOrders = catchAsyncErrors(async (req: Request, res: Response) => {
-  const nurseryId = req.user?._id.toString();
+  const currentUserId = req.user?._id?.toString();
   const resPerPage = 10;
   const currentPage = Number(req.query.page) || 1;
   const skip = resPerPage * (currentPage - 1);
 
-  const filterQuery = { "orderItems.nursery": req.user?._id };
+  // Resolve vendor IDs (both User._id and NurseryProfile._id)
+  const profileDoc = await NurseryProfile.findOne({ nursery: req.user?._id })
+    .select("_id")
+    .lean();
+  const profileId = profileDoc?._id ? profileDoc._id.toString() : null;
+  const vendorIds = [currentUserId, profileId].filter(Boolean) as string[];
+
+  const filterQuery = { "orderItems.nursery": { $in: vendorIds } };
 
   // ⚡ PERF: Parallel query execution with .lean()
   const [totalOrdersCount, orders] = await Promise.all([
     Order.countDocuments(filterQuery),
     Order.find(filterQuery)
       .populate("orderItems.item")
+      .populate("user", "name email phone")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(resPerPage)
@@ -400,9 +433,19 @@ export const getMyNurseryOrders = catchAsyncErrors(async (req: Request, res: Res
   // Clean sub-items context map arrays to keep vendor privacy metrics pristine
   const filteredOrders = orders.map((order) => ({
     ...order,
-    orderItems: (order.orderItems || []).filter(
-      (item: any) => item.nursery?.toString() === nurseryId
-    ),
+    orderItems: (order.orderItems || [])
+      .filter((item: any) => {
+        const itemNid = item.nursery?.toString();
+        return itemNid && vendorIds.includes(itemNid);
+      })
+      .map((oi: any) => {
+        const productDoc = oi.item || oi.product || {};
+        return {
+          ...oi,
+          item: productDoc,
+          product: productDoc,
+        };
+      }),
   }));
 
   res.status(200).json({
@@ -745,12 +788,16 @@ export const updateOrderNursery = catchAsyncErrors(
       }
 
       const currentNurseryId = req.user?._id.toString();
+      const profileDoc = await NurseryProfile.findOne({ nursery: req.user?._id }).select("_id").lean();
+      const profileId = profileDoc?._id ? profileDoc._id.toString() : null;
+      const vendorIds = [currentNurseryId, profileId].filter(Boolean) as string[];
+
       const ledgerEntries: any[] = [];
       const nurseryCancelledItems: any[] = [];
       let nurseryCancelledItemsTotal = 0;
 
       for (const item of order.orderItems) {
-        if (item.nursery?.toString() === currentNurseryId) {
+        if (item.nursery && vendorIds.includes(item.nursery.toString())) {
           if (item.status === "Cancelled" || item.status === "Delivered") {
             throw new ErrorHandler(`Item is already marked as ${item.status}`, 400);
           }

@@ -55,7 +55,10 @@ export const potAttributesSchema = z.object({
     length: z.string().optional(),
   }).optional(),
   drainageHoles: z.boolean().optional(),
+  hasDrainageHole: z.boolean().optional(),
   shape: z.string().optional(),
+  isIndoorOutdoor: z.string().optional(),
+  includesSaucer: z.boolean().optional(),
 }).passthrough();
 
 export const accessoryAttributesSchema = z.object({
@@ -83,8 +86,9 @@ export const plantCareAttributesSchema = z.object({
 }).passthrough();
 
 export const seedsBulbsAttributesSchema = z.object({
-  sowingSeason: z.array(z.string()).optional(),
-  germinationTime: z.string().optional(),
+  sowingSeason: z.union([z.string(), z.array(z.string())]).optional(),
+  germinationTime: z.union([z.string(), z.number()]).optional(),
+  germinationDays: z.union([z.string(), z.number()]).optional(),
   quantityPerPack: z.string().optional(),
   sunlightRequirement: z.string().optional(),
   seedType: z.string().optional(),
@@ -108,6 +112,8 @@ export const artificialDriedAttributesSchema = z.object({
   color: z.string().optional(),
   brand: z.string().optional(),
   includesVase: z.boolean().optional(),
+  potIncluded: z.boolean().optional(),
+  washable: z.boolean().optional(),
 }).passthrough();
 
 export const validateCategoryAttributes = (
@@ -257,28 +263,40 @@ const extractProductPayload = (body: any) => {
     if (norm) extracted.category = norm;
   }
 
-  // If subCategory was parsed from legacy category field, retain it in attributes
-  if (subCategory) {
-    if (!extracted.attributes) extracted.attributes = {};
-    if (typeof extracted.attributes === "object") {
-      extracted.attributes.subCategory = subCategory;
+  // Parse base attributes if provided as JSON string or object
+  let baseAttrs: Record<string, any> = {};
+  if (extracted.attributes) {
+    if (typeof extracted.attributes === "string") {
+      try {
+        baseAttrs = JSON.parse(extracted.attributes);
+      } catch (e) {
+        baseAttrs = {};
+      }
+    } else if (typeof extracted.attributes === "object" && extracted.attributes !== null) {
+      baseAttrs = { ...extracted.attributes };
     }
   }
 
-  // If attributes is not explicitly provided, gather non-common fields into attributes
-  if (!extracted.attributes) {
-    const gatheredAttrs: Record<string, any> = {};
-    for (const [k, v] of Object.entries(extracted)) {
-      if (!COMMON_PRODUCT_KEYS.has(k) && !payloadKeys.includes(k) && k !== "subCategory") {
-        gatheredAttrs[k] = v;
+  // Gather any non-common top-level fields into baseAttrs
+  for (const [k, v] of Object.entries(extracted)) {
+    if (
+      !COMMON_PRODUCT_KEYS.has(k) &&
+      !payloadKeys.includes(k) &&
+      k !== "attributes" &&
+      k !== "subCategory"
+    ) {
+      if (baseAttrs[k] === undefined && v !== undefined) {
+        baseAttrs[k] = v;
       }
     }
-    extracted.attributes = gatheredAttrs;
-  } else if (typeof extracted.attributes === "string") {
-    try {
-      extracted.attributes = JSON.parse(extracted.attributes);
-    } catch (e) {}
   }
+
+  // If subCategory was parsed from legacy category field, retain it in attributes
+  if (subCategory && !baseAttrs.subCategory) {
+    baseAttrs.subCategory = subCategory;
+  }
+
+  extracted.attributes = baseAttrs;
   return extracted;
 };
 
@@ -655,6 +673,7 @@ export const updateProduct = catchAsyncErrors(
       try {
         const validated = validateCategoryAttributes(product.category, attributes);
         product.attributes = { ...product.attributes, ...validated };
+        product.markModified("attributes");
       } catch (err: any) {
         return next(new ErrorHandler(`Invalid attributes: ${err.message}`, 400));
       }

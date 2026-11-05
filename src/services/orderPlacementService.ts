@@ -686,11 +686,17 @@ export const processOrderPlacement = async (
     }
 
     const nurseryProfiles = await NurseryProfile.find({
-      nursery: { $in: uniqueNurseryIds as any },
+      $or: [
+        { _id: { $in: uniqueNurseryIds as any } },
+        { nursery: { $in: uniqueNurseryIds as any } },
+      ],
     }).lean();
 
     const profileMap = new Map<string, any>();
     for (const p of nurseryProfiles) {
+      if (p._id) {
+        profileMap.set(p._id.toString(), p);
+      }
       if (p.nursery) {
         profileMap.set(p.nursery.toString(), p);
       }

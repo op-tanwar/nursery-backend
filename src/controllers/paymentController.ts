@@ -126,7 +126,9 @@ export const createRazorpayOrder = catchAsyncErrors(
 
       // Check vendor status
       if (dbProduct.nursery) {
-        const nurseryProfile = await NurseryProfile.findOne({ nursery: dbProduct.nursery }).lean();
+        const nurseryProfile = await NurseryProfile.findOne({
+          $or: [{ _id: dbProduct.nursery }, { nursery: dbProduct.nursery }],
+        }).lean();
         if (nurseryProfile && !nurseryProfile.isActive) {
           return next(new ErrorHandler(`Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`, 400));
         }
@@ -187,11 +189,17 @@ export const createRazorpayOrder = catchAsyncErrors(
       }
 
       const nurseryProfiles = await NurseryProfile.find({
-        nursery: { $in: uniqueNurseryIds },
+        $or: [
+          { _id: { $in: uniqueNurseryIds as any } },
+          { nursery: { $in: uniqueNurseryIds as any } },
+        ],
       }).lean();
 
       const profileMap = new Map<string, any>();
       for (const p of nurseryProfiles) {
+        if (p._id) {
+          profileMap.set(p._id.toString(), p);
+        }
         if (p.nursery) {
           profileMap.set(p.nursery.toString(), p);
         }
