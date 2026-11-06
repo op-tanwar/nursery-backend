@@ -656,6 +656,7 @@ export const getPublicVendorBySlug = catchAsyncErrors(
       "gardening-tools": { type: "gardening-tools", defaultCat: "Hand Tools", badge: "Durable", color: "#0f766e", emoji: "🔧" },
       "plant-care": { type: "plant-care", defaultCat: "Organic Fertilizers", badge: "Care", color: "#15803d", emoji: "🧴" },
       "seeds-bulbs": { type: "seeds-bulbs", defaultCat: "Vegetable Seeds", badge: "Grow", color: "#65a30d", emoji: "🌱" },
+      "plant-stands-shelves": { type: "plant-stands-shelves", defaultCat: "Plant Stands", badge: "Display", color: "#b45309", emoji: "🪜" },
       "stands-shelves": { type: "plant-stands-shelves", defaultCat: "Plant Stands", badge: "Display", color: "#b45309", emoji: "🪜" },
       "artificial-dried": { type: "artificial-dried-plants", defaultCat: "Artificial Plants", badge: "Decor", color: "#9f1239", emoji: "🥀" },
     };
@@ -845,6 +846,7 @@ export const getVendorProducts = catchAsyncErrors(
       "gardening-tools": { type: "gardening-tools", defaultCat: "Hand Tools", badge: "Durable", color: "#0f766e", emoji: "🔧" },
       "plant-care": { type: "plant-care", defaultCat: "Organic Fertilizers", badge: "Care", color: "#15803d", emoji: "🧴" },
       "seeds-bulbs": { type: "seeds-bulbs", defaultCat: "Vegetable Seeds", badge: "Grow", color: "#65a30d", emoji: "🌱" },
+      "plant-stands-shelves": { type: "plant-stands-shelves", defaultCat: "Plant Stands", badge: "Display", color: "#b45309", emoji: "🪜" },
       "stands-shelves": { type: "plant-stands-shelves", defaultCat: "Plant Stands", badge: "Display", color: "#b45309", emoji: "🪜" },
       "artificial-dried": { type: "artificial-dried-plants", defaultCat: "Artificial Plants", badge: "Decor", color: "#9f1239", emoji: "🥀" },
     };
@@ -893,10 +895,11 @@ export const getAdminVendorDetails = catchAsyncErrors(
     }
 
     const nurseryUserId = profile.nursery?._id || profile.nursery;
+    const allVendorIds = [profile._id, nurseryUserId].filter(Boolean);
 
     const [products, orders] = await Promise.all([
-      Product.find({ nursery: nurseryUserId }).lean(),
-      Order.find({ "orderItems.nursery": nurseryUserId }).lean(),
+      Product.find({ nursery: { $in: allVendorIds } }).lean(),
+      Order.find({ "orderItems.nursery": { $in: allVendorIds } }).lean(),
     ]);
 
     const plants = products.filter((p) => p.category === "plants");
@@ -905,12 +908,13 @@ export const getAdminVendorDetails = catchAsyncErrors(
     const gardeningTools = products.filter((p) => p.category === "gardening-tools");
     const plantCare = products.filter((p) => p.category === "plant-care");
     const seedsBulbs = products.filter((p) => p.category === "seeds-bulbs");
-    const plantStands = products.filter((p) => p.category === "stands-shelves");
+    const plantStands = products.filter((p) => p.category === "plant-stands-shelves" || p.category === "stands-shelves");
     const artificialDriedPlants = products.filter((p) => p.category === "artificial-dried");
 
+    const vendorIdStrs = new Set(allVendorIds.map((v: any) => String(v)));
     const totalGrossRevenue = orders.reduce((sum, order) => {
-      const nurseryItems = order.orderItems.filter((i: any) => String(i.nursery) === String(nurseryUserId));
-      const itemsTotal = nurseryItems.reduce((iSum: number, i: any) => iSum + i.price * i.quantity, 0);
+      const nurseryItems = order.orderItems.filter((i: any) => vendorIdStrs.has(String(i.nursery)));
+      const itemsTotal = nurseryItems.reduce((iSum: number, i: any) => iSum + (Number(i.price) || 0) * (Number(i.quantity) || 0), 0);
       return sum + itemsTotal;
     }, 0);
 

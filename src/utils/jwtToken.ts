@@ -3,8 +3,12 @@ import jwt, { SignOptions } from "jsonwebtoken";
 import { IUser } from "../models/userModel";
 import * as crypto from "node:crypto";
 import { getAuthCookieOptions } from "./cookieHelper";
+import { assertAccountActive } from "./authGuard";
 
 const sendToken = (user: IUser, statusCode: number, res: Response, req?: Request) => {
+  // 🔒 DEFENSE-IN-DEPTH: Ensure blocked or deactivated accounts can never mint JWT tokens
+  assertAccountActive(user);
+
   const JWT_SECRET = process.env.JWT_SECRET!;
 
   const signOptions: SignOptions = {
@@ -39,7 +43,6 @@ const sendToken = (user: IUser, statusCode: number, res: Response, req?: Request
     .cookie("role", user.role, roleCookieOptions)
     .json({
       success: true,
-      token,
       user: userData,
     });
 };

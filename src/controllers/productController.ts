@@ -10,11 +10,17 @@ import Product, {
   ProductCategory,
 } from "../models/productModel";
 import NurseryProfile from "../models/nurseryProfileModel";
+import Order from "../models/orderModel";
 import ApiFeatures from "../utils/apiFeatures";
 import cacheManager from "../utils/cacheManager";
 import { resolveSlugOrRedirect } from "../utils/slugify";
 import { uploadToCloudinary, deleteFromCloudinary } from "../utils/uploadHelper";
 import { getActiveNurseryIds, ACTIVE_NURSERIES_CACHE_KEY } from "./cartController";
+import {
+  getServiceableNurseriesForCatalog,
+  normalizeIndianPincode,
+} from "../utils/pincodeService";
+import { normalizeCategorySlug } from "../constants/categories";
 
 /**
  * 🔒 Strict ownership verification helper
@@ -136,6 +142,7 @@ export const validateCategoryAttributes = (
       return plantCareAttributesSchema.parse(parsedAttr);
     case "seeds-bulbs":
       return seedsBulbsAttributesSchema.parse(parsedAttr);
+    case "plant-stands-shelves":
     case "stands-shelves":
       return standsShelvesAttributesSchema.parse(parsedAttr);
     case "artificial-dried":
@@ -171,48 +178,17 @@ const CATEGORY_PAYLOAD_MAP: Record<string, ProductCategory> = {
   gardeningToolData: "gardening-tools",
   plantCareData: "plant-care",
   seedsBulbsData: "seeds-bulbs",
-  plantStandsShelvesData: "stands-shelves",
+  plantStandsShelvesData: "plant-stands-shelves",
   artificialDriedPlantData: "artificial-dried",
 };
 
 export const normalizeCategory = (cat?: any): ProductCategory | undefined => {
   if (!cat || typeof cat !== "string") return undefined;
+  const canonical = normalizeCategorySlug(cat);
+  if (canonical && PRODUCT_CATEGORIES.includes(canonical as ProductCategory)) {
+    return canonical as ProductCategory;
+  }
   const c = cat.toLowerCase().trim();
-  if (
-    c === "plant-stands-shelves" ||
-    c === "stands-shelves" ||
-    c === "plantstandsshelves" ||
-    c === "plant-stands-and-shelves" ||
-    c === "plant stands"
-  ) {
-    return "stands-shelves";
-  }
-  if (
-    c === "artificial-dried-plants" ||
-    c === "artificial-dried" ||
-    c === "artificialdriedplant" ||
-    c === "artificial & dried plants"
-  ) {
-    return "artificial-dried";
-  }
-  if (c === "gardening-tools" || c === "gardeningtools" || c === "gardening tools") {
-    return "gardening-tools";
-  }
-  if (c === "plant-care" || c === "plantcare" || c === "plant care") {
-    return "plant-care";
-  }
-  if (c === "seeds-bulbs" || c === "seedsbulbs" || c === "seeds & bulbs") {
-    return "seeds-bulbs";
-  }
-  if (c === "plants" || c === "plant") {
-    return "plants";
-  }
-  if (c === "pots" || c === "pot") {
-    return "pots";
-  }
-  if (c === "accessories" || c === "accessory") {
-    return "accessories";
-  }
   if (PRODUCT_CATEGORIES.includes(c as ProductCategory)) {
     return c as ProductCategory;
   }
@@ -457,6 +433,9 @@ export const getAllProducts = catchAsyncErrors(
       minPrice,
       maxPrice,
       subCategory,
+      pincode,
+      pinCode,
+      postalCode,
       ...otherQueries
     } = req.query;
 
@@ -472,7 +451,11 @@ export const getAllProducts = catchAsyncErrors(
 
     const normCategory = normalizeCategory(category);
     if (normCategory) {
-      baseFilter.category = normCategory;
+      if (normCategory === "plant-stands-shelves" || normCategory === "stands-shelves") {
+        baseFilter.category = { $in: ["plant-stands-shelves", "stands-shelves"] };
+      } else {
+        baseFilter.category = normCategory;
+      }
     }
 
     // Subcategory matching (matches attributes.subCategory or tags)
@@ -521,6 +504,57 @@ export const getAllProducts = catchAsyncErrors(
       baseFilter.price = {};
       if (minPrice !== undefined) baseFilter.price.$gte = Number(minPrice);
       if (maxPrice !== undefined) baseFilter.price.$lte = Number(maxPrice);
+    }
+
+    // 🚚 Geographic Serviceability & Catalog Pre-filtering Optimization:
+    // If the category is non-perishable (pots, tools, seeds, fertilizers, accessories),
+    // bypass the distance check entirely before hitting the geo module.
+    const isNationalCourierCategory =
+      normCategory &&
+      [
+        "pots",
+        "accessories",
+        "gardening-tools",
+        "plant-care",
+        "seeds-bulbs",
+        "stands-shelves",
+        "artificial-dried",
+      ].includes(normCategory);
+
+    const rawCustomerPin = (pincode || pinCode || postalCode) as string | undefined;
+
+    if (rawCustomerPin && !isNationalCourierCategory) {
+      let cleanCustomerPin: string | null = null;
+      try {
+        cleanCustomerPin = normalizeIndianPincode(String(rawCustomerPin));
+      } catch {
+        // Invalid pin code format provided
+      }
+
+      if (cleanCustomerPin) {
+        // Batch pre-fetch distinct serviceable nurseries ONCE per catalog request via Two-Tier cache
+        const serviceableNurseryIds = await getServiceableNurseriesForCatalog(cleanCustomerPin);
+
+        if (!targetNursery) {
+          if (serviceableNurseryIds.size > 0) {
+            const geoOrCondition = [
+              { shippingType: "NATIONAL_COURIER" },
+              { nursery: { $in: Array.from(serviceableNurseryIds) } },
+            ];
+            if (!baseFilter.$or) {
+              baseFilter.$or = geoOrCondition;
+            } else if (!baseFilter.$and) {
+              baseFilter.$and = [{ $or: baseFilter.$or }, { $or: geoOrCondition }];
+              delete baseFilter.$or;
+            } else {
+              baseFilter.$and.push({ $or: geoOrCondition });
+            }
+          } else {
+            // No local nurseries serviceable for this pincode; show only courier-deliverable products
+            baseFilter.shippingType = "NATIONAL_COURIER";
+          }
+        }
+      }
     }
 
     // Apply ApiFeatures (Safe Regex search, sorting, whitelisted filtering, pagination)
@@ -839,7 +873,13 @@ export const getMyNurseryProducts = catchAsyncErrors(
     const filter: any = { nursery: { $in: nurseryIds } };
     if (category) {
       const norm = normalizeCategory(category);
-      if (norm) filter.category = norm;
+      if (norm) {
+        if (norm === "plant-stands-shelves" || norm === "stands-shelves") {
+          filter.category = { $in: ["plant-stands-shelves", "stands-shelves"] };
+        } else {
+          filter.category = norm;
+        }
+      }
     }
 
     const products = await Product.find(filter).sort("-createdAt").lean();
@@ -854,14 +894,33 @@ export const getMyNurseryProducts = catchAsyncErrors(
       gardeningTools: products.filter((p) => p.category === "gardening-tools"),
       plantCare: products.filter((p) => p.category === "plant-care"),
       seedsBulbs: products.filter((p) => p.category === "seeds-bulbs"),
-      plantStandsShelves: products.filter((p) => p.category === "stands-shelves"),
+      plantStandsShelves: products.filter((p) => p.category === "plant-stands-shelves" || p.category === "stands-shelves"),
       artificials: products.filter((p) => p.category === "artificial-dried"),
     });
   }
 );
 
 /**
- * ⭐ CREATE OR UPDATE PRODUCT REVIEW
+ * 🧮 Authoritative review ratings recalculator (ignores rejected reviews)
+ */
+export const recalculateProductRatings = (product: IProduct): void => {
+  const activeReviews = (product.reviews || []).filter(
+    (r) => (r.status || "approved") !== "rejected"
+  );
+  product.ratingsQuantity = activeReviews.length;
+  product.numOfReviews = activeReviews.length;
+  if (activeReviews.length === 0) {
+    product.ratingsAverage = 0;
+    product.ratings = 0;
+  } else {
+    const totalRating = activeReviews.reduce((acc, item) => acc + (item.rating || 0), 0);
+    product.ratingsAverage = Math.round((totalRating / activeReviews.length) * 10) / 10;
+    product.ratings = product.ratingsAverage;
+  }
+};
+
+/**
+ * ⭐ CREATE PRODUCT REVIEW WITH VERIFIED BUYER ENFORCEMENT
  * POST /api/v1/products/:id/review
  */
 export const createProductReview = catchAsyncErrors(
@@ -872,32 +931,69 @@ export const createProductReview = catchAsyncErrors(
     if (!user) return next(new ErrorHandler("Unauthorized", 401));
     if (!rating || !comment) return next(new ErrorHandler("Rating and comment are required.", 400));
 
-    const product = await Product.findById(req.params.id);
-    if (!product) return next(new ErrorHandler("Product not found.", 404));
-
-    const existingReviewIndex = product.reviews.findIndex(
-      (r) => r.user && r.user.toString() === user._id.toString()
-    );
-
-    if (existingReviewIndex > -1) {
-      product.reviews[existingReviewIndex].rating = Number(rating);
-      product.reviews[existingReviewIndex].comment = comment;
-    } else {
-      product.reviews.push({
-        user: user._id,
-        name: user.name || "Customer",
-        rating: Number(rating),
-        comment,
-        isVerifiedBuyer: true,
-      });
+    const numericRating = Number(rating);
+    if (isNaN(numericRating) || numericRating < 1 || numericRating > 5) {
+      return next(new ErrorHandler("Rating must be a number between 1 and 5.", 400));
     }
 
-    product.ratingsQuantity = product.reviews.length;
-    product.numOfReviews = product.reviews.length;
+    const productIdRaw = req.params.id || req.body.productId;
+    if (!productIdRaw || !mongoose.Types.ObjectId.isValid(productIdRaw)) {
+      return next(new ErrorHandler("Invalid product ID.", 400));
+    }
 
-    const totalRating = product.reviews.reduce((acc, item) => acc + item.rating, 0);
-    product.ratingsAverage = totalRating / product.reviews.length;
-    product.ratings = product.ratingsAverage;
+    const product = await Product.findById(productIdRaw);
+    if (!product) return next(new ErrorHandler("Product not found.", 404));
+
+    const userObjectId = new mongoose.Types.ObjectId(String(user._id));
+    const productObjectId = new mongoose.Types.ObjectId(String(product._id));
+
+    // 🔒 1. Duplicate Review Prevention: Check if user already submitted a review
+    const hasAlreadyReviewed = product.reviews.some(
+      (r) => r.user && r.user.toString() === userObjectId.toString()
+    );
+
+    if (hasAlreadyReviewed) {
+      return next(
+        new ErrorHandler("You have already submitted a review for this product", 400)
+      );
+    }
+
+    // 🔒 2. Order History & Delivery Check:
+    // Only grant verified status if user has an order with status 'Delivered' containing this product (not cancelled).
+    const hasDeliveredOrder = await Order.exists({
+      user: userObjectId,
+      orderStatus: "Delivered",
+      orderItems: {
+        $elemMatch: {
+          item: productObjectId,
+          status: { $ne: "Cancelled" },
+        },
+      },
+    });
+
+    const isVerifiedBuyer = Boolean(hasDeliveredOrder);
+
+    // Business policy: if strict verified-only mode is configured, reject non-purchasers with 403
+    if (process.env.REQUIRE_VERIFIED_PURCHASE_FOR_REVIEW === "true" && !isVerifiedBuyer) {
+      return next(
+        new ErrorHandler(
+          "Only verified buyers who have received this product can submit a review.",
+          403
+        )
+      );
+    }
+
+    product.reviews.push({
+      user: userObjectId,
+      name: (user.name || "Customer").trim(),
+      rating: numericRating,
+      comment: String(comment).trim(),
+      isVerifiedBuyer,
+      status: "approved",
+    });
+
+    // 🔒 3. Rating & Aggregation Recalculation (atomic rounding to 1 decimal place)
+    recalculateProductRatings(product);
 
     await product.save({ validateBeforeSave: false });
 
@@ -906,6 +1002,7 @@ export const createProductReview = catchAsyncErrors(
       message: "Review recorded successfully.",
       ratingsAverage: product.ratingsAverage,
       ratingsQuantity: product.ratingsQuantity,
+      isVerifiedBuyer,
     });
   }
 );
@@ -941,13 +1038,7 @@ export const deleteProductReview = catchAsyncErrors(
     }
 
     product.reviews.splice(reviewIndex, 1);
-    product.ratingsQuantity = product.reviews.length;
-    product.numOfReviews = product.reviews.length;
-
-    const totalRating = product.reviews.reduce((acc, item) => acc + item.rating, 0);
-    product.ratingsAverage =
-      product.reviews.length > 0 ? totalRating / product.reviews.length : 0;
-    product.ratings = product.ratingsAverage;
+    recalculateProductRatings(product);
 
     await product.save({ validateBeforeSave: false });
 

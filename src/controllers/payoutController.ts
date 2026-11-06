@@ -10,6 +10,7 @@ import {
   calculateGlobalFinancialSummary,
   getNextSettlementDate,
   roundMoney,
+  resolveNurseryIdentity,
 } from "../utils/financialUtils";
 import { withTransaction } from "../utils/transactionHelper";
 import { sendPayoutStatusEmail } from "../templates/emails";
@@ -28,13 +29,15 @@ export const getNurseryPayoutSummary = catchAsyncErrors(
     if (!req.user) {
       return next(new ErrorHandler("Please login to access this resource", 401));
     }
-    const nurseryId = req.user._id;
+    const { profileId, allIds } = await resolveNurseryIdentity(req.user._id);
 
     // Single source of truth calculation
-    const summary = await calculateNurseryFinancialSummary(nurseryId);
+    const summary = await calculateNurseryFinancialSummary(profileId);
 
     // Fetch nursery profile bank details
-    const profile = await NurseryProfile.findOne({ nursery: nurseryId })
+    const profile = await NurseryProfile.findOne({
+      $or: [{ _id: profileId }, { nursery: req.user._id }],
+    })
       .select("+bankDetails.accountNumber +bankDetails.ifscCode")
       .lean();
 
@@ -68,10 +71,10 @@ export const getNurseryPayoutHistory = catchAsyncErrors(
     if (!req.user) {
       return next(new ErrorHandler("Please login to access this resource", 401));
     }
-    const nurseryId = req.user._id;
+    const { allIds } = await resolveNurseryIdentity(req.user._id);
     const { status, page = 1, limit = 10 } = req.query;
 
-    const query: Record<string, any> = { nursery: nurseryId };
+    const query: Record<string, any> = { nursery: { $in: allIds } };
     if (status && status !== "ALL") {
       query.status = status;
     }
@@ -111,7 +114,8 @@ export const requestPayout = catchAsyncErrors(
     if (!req.user) {
       return next(new ErrorHandler("Please login to access this resource", 401));
     }
-    const nurseryId = req.user._id;
+    const resolved = await resolveNurseryIdentity(req.user._id);
+    const { profileId, allIds, userId } = resolved;
     const { amount, payoutMethod, idempotencyKey } = req.body;
 
     const requestedAmount = Number(amount);
@@ -140,7 +144,9 @@ export const requestPayout = catchAsyncErrors(
     }
 
     // Verify bank details exist before allowing request
-    const profile = await NurseryProfile.findOne({ nursery: nurseryId })
+    const profile = await NurseryProfile.findOne({
+      $or: [{ nursery: userId }, { _id: profileId }],
+    })
       .select("+bankDetails.accountNumber +bankDetails.ifscCode +bankDetails.bankName +bankDetails.accountHolderName")
       .lean();
     if (!profile?.bankDetails?.accountNumber || !profile?.bankDetails?.ifscCode) {
@@ -163,7 +169,7 @@ export const requestPayout = catchAsyncErrors(
     await withTransaction(async (session) => {
       // 🛡️ RACE CONDITION GUARD: Prevent concurrent pending requests
       const pendingQuery = Payout.findOne({
-        nursery: nurseryId,
+        nursery: { $in: allIds },
         status: { $in: ["PENDING", "PROCESSING"] },
       });
       if (session) pendingQuery.session(session);
@@ -177,7 +183,7 @@ export const requestPayout = catchAsyncErrors(
       }
 
       // 🛡️ AUTHORITATIVE BALANCE CHECK INSIDE TRANSACTION
-      const summary = await calculateNurseryFinancialSummary(nurseryId, session);
+      const summary = await calculateNurseryFinancialSummary(profileId || userId, session);
 
       if (summary.hasNegativeBalance) {
         throw new ErrorHandler(
@@ -198,7 +204,7 @@ export const requestPayout = catchAsyncErrors(
       const [newPayout] = await Payout.create(
         [
           {
-            nursery: nurseryId,
+            nursery: userId,
             requestedAmount: roundMoney(requestedAmount),
             commissionDeducted: roundMoney(summary.totalCommission),
             netAmount: roundMoney(requestedAmount), // Requested amount IS the net (post-commission) withdrawal
@@ -223,7 +229,7 @@ export const requestPayout = catchAsyncErrors(
       await TransactionLedger.create(
         [
           {
-            nursery: nurseryId,
+            nursery: profileId || userId,
             entryType: "PAYOUT_REQUESTED",
             amount: roundMoney(requestedAmount),
             direction: "DEBIT",
@@ -268,7 +274,7 @@ export const getNurseryCommissionBreakdown = catchAsyncErrors(
     if (!req.user) {
       return next(new ErrorHandler("Please login to access this resource", 401));
     }
-    const nurseryId = req.user._id;
+    const { allIds } = await resolveNurseryIdentity(req.user._id);
     const { page = 1, limit = 20 } = req.query;
 
     const currentPage = Math.max(1, Number(page));
@@ -277,8 +283,8 @@ export const getNurseryCommissionBreakdown = catchAsyncErrors(
 
     // Fetch ledger entries for full double-entry transparency
     const [totalLedgerCount, ledgerEntries] = await Promise.all([
-      TransactionLedger.countDocuments({ nursery: nurseryId }),
-      TransactionLedger.find({ nursery: nurseryId })
+      TransactionLedger.countDocuments({ nursery: { $in: allIds } }),
+      TransactionLedger.find({ nursery: { $in: allIds } })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(resPerPage)
@@ -288,7 +294,7 @@ export const getNurseryCommissionBreakdown = catchAsyncErrors(
 
     // Summary of reversals
     const reversalStats = await TransactionLedger.aggregate([
-      { $match: { nursery: nurseryId, entryType: "COMMISSION_REVERSED" } },
+      { $match: { nursery: { $in: allIds }, entryType: "COMMISSION_REVERSED" } },
       { $group: { _id: null, totalReversed: { $sum: "$amount" }, count: { $sum: 1 } } },
     ]);
 
@@ -325,7 +331,8 @@ export const getAdminPayoutsList = catchAsyncErrors(
       query.status = status;
     }
     if (nurseryId) {
-      query.nursery = nurseryId;
+      const resolved = await resolveNurseryIdentity(nurseryId as string);
+      query.nursery = { $in: resolved.allIds };
     }
 
     const currentPage = Math.max(1, Number(page));
@@ -346,13 +353,19 @@ export const getAdminPayoutsList = catchAsyncErrors(
 
     // Attach bank details snapshot to each payout for admin convenience
     const nurseryIds = payouts.map((p) => (p.nursery as any)?._id).filter(Boolean);
-    const profiles = await NurseryProfile.find({ nursery: { $in: nurseryIds } })
+    const profiles = await NurseryProfile.find({
+      $or: [
+        { nursery: { $in: nurseryIds } },
+        { _id: { $in: nurseryIds } },
+      ],
+    })
       .select("+bankDetails.accountNumber +bankDetails.ifscCode")
       .lean();
 
     const profileMap = new Map<string, any>();
     profiles.forEach((p) => {
-      profileMap.set(p.nursery.toString(), p);
+      if (p.nursery) profileMap.set(p.nursery.toString(), p);
+      profileMap.set(p._id.toString(), p);
     });
 
     const enrichedPayouts = payouts.map((p) => {
@@ -522,7 +535,13 @@ export const adminUpdatePayoutStatus = catchAsyncErrors(
       if (emailStatus) {
         // Fetch nursery user for email/name
         const { default: User } = await import("../models/userModel");
-        const nurseryUser = await User.findById(updatedPayout.nursery).select("name email").lean();
+        let nurseryUser = await User.findById(updatedPayout.nursery).select("name email").lean();
+        if (!nurseryUser) {
+          const np = await NurseryProfile.findById(updatedPayout.nursery).select("nursery").lean();
+          if (np?.nursery) {
+            nurseryUser = await User.findById(np.nursery).select("name email").lean();
+          }
+        }
         if (nurseryUser?.email) {
           const note = status === "COMPLETED"
             ? `UTR Reference: ${utrNumber}`

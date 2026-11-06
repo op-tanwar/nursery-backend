@@ -3,6 +3,7 @@ import axios from "axios";
 import User, { IUser } from "../models/userModel";
 import ErrorHandler from "../utils/errorHandler";
 import { sendWelcomeEmail } from "../utils/orderEmailService";
+import { assertAccountActive } from "../utils/authGuard";
 
 export interface GoogleUserProfile {
   provider: "google";
@@ -18,7 +19,11 @@ export interface GoogleUserProfile {
  */
 function getGoogleOAuthClient(): OAuth2Client {
   const clientId = process.env.GOOGLE_CLIENT_ID;
-  return new OAuth2Client(clientId);
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  return new OAuth2Client({
+    clientId,
+    clientSecret,
+  });
 }
 
 /**
@@ -161,13 +166,8 @@ export async function authenticateSocialUser(
   });
 
   if (user) {
-    // Check if user is blocked or suspended
-    if (user.isBlocked || user.status === "Blocked") {
-      throw new ErrorHandler("Your account has been blocked. Please contact support.", 403);
-    }
-    if (user.status === "Suspended") {
-      throw new ErrorHandler("Your account is currently suspended. Please contact support.", 403);
-    }
+    // 🔒 SECURITY GUARD: Assert user account is active before proceeding
+    assertAccountActive(user);
 
     // 🔒 SECURITY GUARD: Existing user's role MUST be preserved.
     // NEVER overwrite or mutate user.role with preferredRole from client payload.

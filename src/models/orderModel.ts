@@ -117,6 +117,9 @@ const orderSchema = new Schema<IOrder>(
 
 orderSchema.index({ user: 1, createdAt: -1 });
 orderSchema.index({ user: 1 });
+// ⚡ Optimized compound indexes for high-throughput verified buyer purchase validation
+orderSchema.index({ user: 1, "orderItems.item": 1, orderStatus: 1 });
+orderSchema.index({ user: 1, "orderItems.product": 1, orderStatus: 1 });
 orderSchema.index({ "orderItems.nursery": 1, createdAt: -1 });
 orderSchema.index({ "orderItems.nursery": 1, orderStatus: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1, createdAt: -1 });

@@ -6,7 +6,9 @@ import {
   forgotPassword,
   resetPassword,
   socialLogin,
+  getUserDetails,
 } from "../controllers/userController";
+import { isAuthenticatedUser } from "../middleware/auth";
 
 const router = Router();
 
@@ -24,5 +26,8 @@ router.post("/login", loginUser);
 router.post("/logout", logoutUser);
 router.post("/password/forgot", forgotPassword);
 router.put("/password/reset/:token", resetPassword);
+
+// Current Authenticated Session Endpoint (HTTP-only cookie validation)
+router.get("/me", isAuthenticatedUser, getUserDetails);
 
 export default router;

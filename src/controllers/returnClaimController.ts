@@ -893,3 +893,15 @@ export const updateClaimStatus = catchAsyncErrors(
     });
   }
 );
+
+// ======================================================================
+// 🔄 BACKWARD-COMPATIBLE ALIASES FOR UNIFIED RETURN / CLAIM SYSTEM
+// ======================================================================
+export const createReturnRequest = createClaimRequest;
+export const createReturnReplacementRequest = createClaimRequest;
+export const getAllReturnRequestsAdmin = getAllClaimsAdmin;
+export const updateReturnRequestStatusAdmin = updateClaimStatus;
+export const getNurseryReturnRequests = getClaimsByNursery;
+export const getOrderReturnRequests = getClaimsByUser;
+export const getSingleReturnRequest = getClaimById;
+

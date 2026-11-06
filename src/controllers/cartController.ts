@@ -12,6 +12,7 @@ import {
   UnavailableReason,
 } from "../types/cartWishlist.types";
 import cacheManager from "../utils/cacheManager";
+import { resolveProductCommissionType } from "../utils/productRegistry";
 
 // ======================================================================
 // ⚡ CENTRALIZED CACHE CONSTANTS & INVALIDATION UTILITIES
@@ -317,7 +318,7 @@ export const addToCart = catchAsyncErrors(
       }
       cart = await Cart.create({
         user: userId,
-        items: [{ product: productId, itemModel: "Product", quantity, nursery: product.nursery }]
+        items: [{ product: productId, itemModel: resolveProductCommissionType(product), quantity, nursery: product.nursery }]
       }) as unknown as ICartDocument;
     } else {
       const itemIndex = cart.items.findIndex((item) => item.product.toString() === productId);
@@ -332,7 +333,7 @@ export const addToCart = catchAsyncErrors(
         if (availableStock < quantity) {
           return next(new ErrorHandler(`Only ${availableStock} units available in stock`, 400));
         }
-        cart.items.push({ product: productId, itemModel: "Product", quantity, nursery: product.nursery });
+        cart.items.push({ product: productId, itemModel: resolveProductCommissionType(product), quantity, nursery: product.nursery });
       }
       await cart.save();
     }
@@ -479,7 +480,7 @@ export const syncCart = catchAsyncErrors(
         if (targetQty > 0) {
           cart.items.push({
             product: prodId as any,
-            itemModel: "Product",
+            itemModel: resolveProductCommissionType(product),
             quantity: targetQty,
             nursery: product.nursery,
           });

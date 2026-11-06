@@ -36,6 +36,10 @@ router
     "/admin/dashboard",
     "/admin",
     "/admin/dashboard-stats",
+    "/admin/stats",
+    "/dashboard-stats",
+    "/dashboard",
+    "/stats",
   ])
   .get(
     isAuthenticatedUser,

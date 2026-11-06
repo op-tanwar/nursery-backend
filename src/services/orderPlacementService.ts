@@ -8,7 +8,10 @@ import TransactionLedger from "../models/transactionLedgerModel";
 import Coupon from "../models/couponModel";
 import ErrorHandler from "../utils/errorHandler";
 import { getRazorpayInstance } from "./razorpay";
-import { commitStockReservation } from "./stockReservationService";
+import {
+  commitStockReservation,
+  releaseStockReservation,
+} from "./stockReservationService";
 import { processFallbackRefund } from "./fallbackRefundService";
 import { checkCartAvailability } from "../controllers/cartController";
 import { verifyCouponInternal } from "../controllers/couponController";
@@ -17,6 +20,7 @@ import Product from "../models/productModel";
 import {
   getCaseInsensitiveModel,
   resolveProductAndModel,
+  resolveProductCommissionType,
 } from "../utils/productRegistry";
 import {
   getEffectivePrice,
@@ -90,6 +94,9 @@ export type OrderPlacementResult =
   | {
       status: "UNSERVICEABLE";
       unserviceableItems: any[];
+      refunded?: boolean;
+      refundId?: string;
+      message?: string;
     }
   | {
       status: "COLLISION_REFUNDED";
@@ -161,11 +168,12 @@ export const calculateAndVerifyOrderTotals = async (
     const quantity = Math.max(1, Number(item.quantity) || 1);
 
     const dbProduct = await Product.findById(targetId);
-    const modelName = "Product";
 
     if (!dbProduct) {
       throw new ErrorHandler(`Product reference not found: ${targetId}`, 404);
     }
+
+    const modelName = resolveProductCommissionType(dbProduct, item.itemModel);
 
     if (dbProduct.isActive === false) {
       throw new ErrorHandler(
@@ -679,8 +687,37 @@ export const processOrderPlacement = async (
 
   if (uniqueNurseryIds.length > 0) {
     if (!destinationPincode || !/^[1-9][0-9]{5}$/.test(destinationPincode)) {
+      // 🔓 Release pending stock reservation
+      if (paymentInfo?.razorpay_order_id) {
+        try {
+          await releaseStockReservation(
+            paymentInfo.razorpay_order_id,
+            "INVALID_PINCODE_POST_CAPTURE"
+          );
+        } catch (relErr: any) {
+          console.warn("⚠️ [StockReservation] Error releasing hold on invalid pincode:", relErr?.message);
+        }
+      }
+
+      // 💸 Automatic Fallback Refund for captured payment
+      if (paymentInfo?.razorpay_payment_id && chargedAmountPaise > 0) {
+        try {
+          await processFallbackRefund({
+            razorpayPaymentId: paymentInfo.razorpay_payment_id,
+            razorpayOrderId: paymentInfo.razorpay_order_id,
+            amountPaise: chargedAmountPaise,
+            userId: user?._id,
+            customerEmail: user?.email,
+            customerName: user?.name,
+            reason: `Automatic refund: Pincode "${destinationPincode || "unknown"}" is invalid post-capture`,
+          });
+        } catch (refErr: any) {
+          console.error("🚨 [CRITICAL] Fallback refund error on invalid pincode:", refErr?.message);
+        }
+      }
+
       throw new ErrorHandler(
-        "A valid 6-digit shipping pincode is required to verify delivery serviceability.",
+        "A valid 6-digit shipping pincode is required to verify delivery serviceability. Your payment has been refunded.",
         400
       );
     }
@@ -706,6 +743,9 @@ export const processOrderPlacement = async (
       productId: String(entry.dbProduct._id),
       productName: entry.dbProduct.name,
       nurseryId: entry.dbProduct.nursery ? entry.dbProduct.nursery.toString() : null,
+      category: entry.dbProduct.category,
+      itemModel: (entry.dbProduct as any).itemModel,
+      shippingType: (entry.dbProduct as any).shippingType,
     }));
 
     const serviceability = await checkCartItemsPincodeServiceability(
@@ -715,9 +755,88 @@ export const processOrderPlacement = async (
     );
 
     if (!serviceability.isServiceable) {
+      // 🔓 1. Release pending stock reservation
+      if (paymentInfo?.razorpay_order_id) {
+        try {
+          await releaseStockReservation(
+            paymentInfo.razorpay_order_id,
+            `UNSERVICEABLE_PINCODE_${destinationPincode}`
+          );
+        } catch (relErr: any) {
+          console.warn("⚠️ [StockReservation] Error releasing reservation on unserviceable pincode:", relErr?.message);
+        }
+      }
+
+      // 💸 2. Automated Fallback Refund for captured payment
+      let refundResult: any = { success: false };
+      const refundReason = `Automatic refund: Pincode ${destinationPincode || "unknown"} is unserviceable post-capture`;
+
+      if (paymentInfo?.razorpay_payment_id && chargedAmountPaise > 0) {
+        try {
+          // Idempotency: Avoid duplicate refund if fallback was already recorded
+          const existingRefundLedger = await TransactionLedger.findOne({
+            entryType: "FALLBACK_REFUND",
+            "metadata.razorpayPaymentId": paymentInfo.razorpay_payment_id,
+          });
+
+          if (existingRefundLedger) {
+            console.log(`ℹ️ [FallbackRefund] Refund already recorded in ledger for payment ${paymentInfo.razorpay_payment_id}. Skipping duplicate dispatch.`);
+            refundResult = {
+              success: true,
+              refundId: existingRefundLedger.metadata?.refundId,
+            };
+          } else {
+            refundResult = await processFallbackRefund({
+              razorpayPaymentId: paymentInfo.razorpay_payment_id,
+              razorpayOrderId: paymentInfo.razorpay_order_id,
+              amountPaise: chargedAmountPaise,
+              userId: user?._id,
+              customerEmail: user?.email,
+              customerName: user?.name,
+              reason: refundReason,
+              orderItems: totals.calculatedItems,
+              metadata: {
+                destinationPincode,
+                unserviceableItems: serviceability.unserviceableItems,
+              },
+            });
+
+            if (refundResult.success) {
+              console.log("✅ [FallbackRefund Audit] Automated unserviceable pincode refund processed successfully:", {
+                paymentId: paymentInfo.razorpay_payment_id,
+                orderId: paymentInfo.razorpay_order_id,
+                pincode: destinationPincode,
+                amount: toRupees(chargedAmountPaise),
+                refundId: refundResult.refundId,
+              });
+            } else {
+              console.error("🚨 [CRITICAL] [FallbackRefund Audit] Gateway refund failed for unserviceable pincode:", {
+                paymentId: paymentInfo.razorpay_payment_id,
+                orderId: paymentInfo.razorpay_order_id,
+                pincode: destinationPincode,
+                amount: toRupees(chargedAmountPaise),
+                error: refundResult.error,
+              });
+            }
+          }
+        } catch (refundError: any) {
+          console.error("🚨 [CRITICAL] Unhandled exception executing fallback refund for unserviceable pincode:", {
+            paymentId: paymentInfo.razorpay_payment_id,
+            orderId: paymentInfo.razorpay_order_id,
+            pincode: destinationPincode,
+            error: refundError?.message,
+          });
+        }
+      }
+
       return {
         status: "UNSERVICEABLE",
         unserviceableItems: serviceability.unserviceableItems,
+        refunded: Boolean(refundResult.success),
+        refundId: refundResult.refundId,
+        message: refundResult.success
+          ? `Delivery is not available for some items at pincode ${destinationPincode}. Your payment of ₹${toRupees(chargedAmountPaise)} has been automatically refunded to your original payment method (Refund ID: ${refundResult.refundId}).`
+          : `Delivery is not available for some items at pincode ${destinationPincode}. Your refund has been initiated.`,
       };
     }
   }

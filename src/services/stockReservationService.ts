@@ -227,23 +227,41 @@ export const commitStockReservation = async (
   status: "COMMITTED" | "ALREADY_COMMITTED" | "EXPIRED_OR_RELEASED" | "NOT_FOUND";
   reservation?: IStockReservation | null;
 }> => {
-  const reservation = await StockReservation.findOne({
-    razorpayOrderId,
-  }).session(session || null);
+  // 🔒 ATOMIC STATUS GUARD: Exactly one execution transitions PENDING -> COMMITTED
+  const reservation = await StockReservation.findOneAndUpdate(
+    {
+      razorpayOrderId,
+      status: "PENDING",
+    },
+    {
+      $set: {
+        status: "COMMITTED",
+        committedAt: new Date(),
+      },
+    },
+    {
+      new: false,
+      ...(session ? { session } : {}),
+    }
+  );
 
   if (!reservation) {
-    return { success: false, status: "NOT_FOUND" };
+    const existing = await StockReservation.findOne({
+      razorpayOrderId,
+    }).session(session || null);
+
+    if (!existing) {
+      return { success: false, status: "NOT_FOUND" };
+    }
+
+    if (existing.status === "COMMITTED") {
+      return { success: true, status: "ALREADY_COMMITTED", reservation: existing };
+    }
+
+    return { success: false, status: "EXPIRED_OR_RELEASED", reservation: existing };
   }
 
-  if (reservation.status === "COMMITTED") {
-    return { success: true, status: "ALREADY_COMMITTED", reservation };
-  }
-
-  if (reservation.status === "RELEASED") {
-    return { success: false, status: "EXPIRED_OR_RELEASED", reservation };
-  }
-
-  // Pending reservation found — commit stock deduction
+  // Pending reservation won the atomic race — commit permanent stock deduction
   for (const item of reservation.items) {
     await Product.findByIdAndUpdate(
       item.productId,
@@ -256,10 +274,6 @@ export const commitStockReservation = async (
       session ? { session } : {}
     );
   }
-
-  reservation.status = "COMMITTED";
-  reservation.committedAt = new Date();
-  await reservation.save(session ? { session } : {});
 
   // ⚡ Remove Redis hold keys and ZSET tracking
   if (isRedisReady()) {
@@ -285,6 +299,7 @@ export const commitStockReservation = async (
 /**
  * 🔓 Release a pending reservation (e.g. checkout cancelled or TTL expired):
  *   reservedStock: -quantity
+ * Strictly idempotent: MongoDB atomic findOneAndUpdate prevents concurrent double release.
  */
 export const releaseStockReservation = async (
   razorpayOrderId: string,
@@ -295,15 +310,50 @@ export const releaseStockReservation = async (
   reason?: string;
   reservation?: IStockReservation | null;
 }> => {
-  const reservation = await StockReservation.findOne({
-    razorpayOrderId,
-    status: "PENDING",
-  }).session(session || null);
+  // 🔒 ATOMIC STATUS GUARD: Exactly one execution transitions PENDING -> RELEASED
+  const reservation = await StockReservation.findOneAndUpdate(
+    {
+      razorpayOrderId,
+      status: "PENDING",
+    },
+    {
+      $set: {
+        status: "RELEASED",
+        releasedAt: new Date(),
+        releaseReason: reason,
+      },
+    },
+    {
+      new: false, // returns previous document state containing items to restore
+      ...(session ? { session } : {}),
+    }
+  );
+
+  // ⚡ Defensively clear Redis hold keys and ZSET tracking regardless of status
+  if (isRedisReady()) {
+    const client = getRedisClient();
+    if (client) {
+      try {
+        const pipeline = client.pipeline();
+        pipeline.del(`stock_hold:order:${razorpayOrderId}`);
+        if (reservation?.items) {
+          for (const item of reservation.items) {
+            pipeline.del(`stock_hold:item:${String(item.productId)}:${razorpayOrderId}`);
+          }
+        }
+        pipeline.zrem("stock_reservations:expiring", razorpayOrderId);
+        await pipeline.exec();
+      } catch (err: any) {
+        console.warn("⚠️ [StockReservation] Error clearing Redis hold on release:", err.message);
+      }
+    }
+  }
 
   if (!reservation) {
     return { success: false, reason: "NOT_FOUND_OR_NOT_PENDING" };
   }
 
+  // Restore available stock by decrementing reservedStock
   for (const item of reservation.items) {
     await Product.findByIdAndUpdate(
       item.productId,
@@ -312,29 +362,6 @@ export const releaseStockReservation = async (
       },
       session ? { session } : {}
     );
-  }
-
-  reservation.status = "RELEASED";
-  reservation.releasedAt = new Date();
-  reservation.releaseReason = reason;
-  await reservation.save(session ? { session } : {});
-
-  // ⚡ Remove Redis hold keys and ZSET tracking
-  if (isRedisReady()) {
-    const client = getRedisClient();
-    if (client) {
-      try {
-        const pipeline = client.pipeline();
-        pipeline.del(`stock_hold:order:${razorpayOrderId}`);
-        for (const item of reservation.items) {
-          pipeline.del(`stock_hold:item:${String(item.productId)}:${razorpayOrderId}`);
-        }
-        pipeline.zrem("stock_reservations:expiring", razorpayOrderId);
-        await pipeline.exec();
-      } catch (err: any) {
-        console.warn("⚠️ [StockReservation] Error clearing Redis hold on release:", err.message);
-      }
-    }
   }
 
   return { success: true, reservation };
@@ -374,6 +401,8 @@ export const sweepExpiredReservationsDistributed = async (): Promise<number> => 
           if (expiredOrderIds && expiredOrderIds.length > 0) {
             for (const orderId of expiredOrderIds) {
               try {
+                // Remove from ZSET immediately to prevent duplicate sweep attempts across cycles
+                await client.zrem("stock_reservations:expiring", orderId);
                 const res = await releaseStockReservation(orderId, "TTL_EXPIRED");
                 if (res.success) {
                   totalReleased++;
@@ -430,9 +459,29 @@ export const initKeyspaceSubscriber = async (): Promise<void> => {
   try {
     const client = getRedisClient();
     if (client) {
-      await client.config("SET", "notify-keyspace-events", "Ex").catch(() => {
-        // Some managed Redis providers block CONFIG command, which is safe to ignore
-      });
+      // 🛡️ CLOUD-MANAGED REDIS GUARD (Upstash / AWS ElastiCache / Azure / GCP Memorystore):
+      // The CONFIG command is strictly blocked or restricted with NOPERM / unknown command on managed tiers.
+      // Probing is defensively wrapped to prevent unhandled rejections during server startup.
+      try {
+        await client.config("SET", "notify-keyspace-events", "Ex");
+        console.log("📡 [StockReservation] Redis keyspace events configured (notify-keyspace-events=Ex).");
+      } catch (configErr: any) {
+        const errMsg = configErr?.message || String(configErr);
+        if (
+          errMsg.includes("unknown command") ||
+          errMsg.includes("NOPERM") ||
+          errMsg.includes("permission denied") ||
+          errMsg.includes("ERR unknown command 'CONFIG'")
+        ) {
+          console.warn(
+            "⚠️ [StockReservation] CONFIG command is disabled on managed Redis. Falling back to active sweep/dashboard pre-configuration."
+          );
+        } else {
+          console.warn(
+            `⚠️ [StockReservation] Notice: CONFIG SET notify-keyspace-events bypassed (${errMsg}). Falling back to active sweeper.`
+          );
+        }
+      }
     }
 
     await subscriber.psubscribe("__keyevent@*__:expired");
@@ -457,9 +506,9 @@ export const initKeyspaceSubscriber = async (): Promise<void> => {
       }
     });
 
-    console.log("📡 [StockReservation] Redis keyspace expiration listener active.");
+    console.log("📡 [StockReservation] Redis keyspace expiration listener registered.");
   } catch (err: any) {
-    console.warn("⚠️ [StockReservation] Keyspace subscription not available:", err.message);
+    console.warn("⚠️ [StockReservation] Keyspace subscription not available:", err.message || err);
   }
 };
 
@@ -471,10 +520,15 @@ let sweeperInterval: NodeJS.Timeout | null = null;
 let isSweeping = false;
 
 export const initDistributedStockReservation = async (intervalMs = 60000): Promise<void> => {
-  // 1. Initialize keyspace notification listener for real-time expiry
+  // 1. Initialize keyspace notification listener for real-time expiry (guarded against CONFIG failures)
   await initKeyspaceSubscriber();
 
-  // 2. Start distributed sweeper runner (synchronized via distributed lock)
+  // 2. Immediate startup sweep to catch any reservations expired during server restarts
+  sweepExpiredReservationsDistributed().catch((err) => {
+    console.warn("⚠️ [StockReservation] Initial startup sweep notice:", err.message || err);
+  });
+
+  // 3. Start distributed sweeper runner (synchronized via distributed lock)
   if (sweeperInterval) return;
 
   sweeperInterval = setInterval(async () => {

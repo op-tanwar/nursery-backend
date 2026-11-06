@@ -20,6 +20,14 @@ import cloudinary from "cloudinary";
 import { hashToken } from "../utils/security";
 import { authenticateSocialUser } from "../services/authService";
 import validator from "validator";
+import NurseryProfile from "../models/nurseryProfileModel";
+import {
+  assertAccountActive,
+  assertNurseryProfileActive,
+  AppError,
+} from "../utils/authGuard";
+
+export { assertAccountActive, assertNurseryProfileActive, AppError };
 
 // ======================================================================
 // REGISTER USER
@@ -102,11 +110,16 @@ export const loginUser = catchAsyncErrors(
       return next(new ErrorHandler("Invalid credentials", 401));
     }
 
-    const user = await User.findOne({ email: cleanEmail }).select("+password");
+    const user = await User.findOne({ email: cleanEmail }).select(
+      "+password +isActive +isBlocked +status"
+    );
     if (!user) return next(new ErrorHandler("Invalid credentials", 401));
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return next(new ErrorHandler("Invalid credentials", 401));
+
+    // 🔒 SECURITY GUARD: Assert user account is active before token issuance
+    assertAccountActive(user);
 
     sendToken(user, 200, res, req);
   }
@@ -133,13 +146,24 @@ export const nurseryDashboardLogin = catchAsyncErrors(
       return next(new ErrorHandler("Invalid dashboard password", 401));
     }
 
-    const user = await User.findOne({ email: cleanEmail }).select("+dashboardPassword +role");
+    const user = await User.findOne({ email: cleanEmail }).select(
+      "+dashboardPassword +role +isActive +isBlocked +status"
+    );
 
     if (!user || user.role !== "nursery" || !user.dashboardPassword)
       return next(new ErrorHandler("Not authorized for nursery dashboard", 401));
 
     const isMatch = await user.compareDashboardPassword(dashboardPassword);
     if (!isMatch) return next(new ErrorHandler("Invalid dashboard password", 401));
+
+    // 🔒 SECURITY GUARD 1: Assert user account is active
+    assertAccountActive(user);
+
+    // 🔒 SECURITY GUARD 2: Assert linked NurseryProfile status is valid and approved
+    const profile = await NurseryProfile.findOne({ nursery: user._id });
+    if (profile) {
+      assertNurseryProfileActive(profile);
+    }
 
     sendToken(user, 200, res, req);
   }
@@ -166,13 +190,18 @@ export const adminDashboardLogin = catchAsyncErrors(
       return next(new ErrorHandler("Invalid dashboard password", 401));
     }
 
-    const user = await User.findOne({ email: cleanEmail }).select("+dashboardPassword +role");
+    const user = await User.findOne({ email: cleanEmail }).select(
+      "+dashboardPassword +role +isActive +isBlocked +status"
+    );
 
     if (!user || user.role !== "admin" || !user.dashboardPassword)
       return next(new ErrorHandler("Not authorized for admin dashboard", 401));
 
     const isMatch = await user.compareDashboardPassword(dashboardPassword);
     if (!isMatch) return next(new ErrorHandler("Invalid dashboard password", 401));
+
+    // 🔒 SECURITY GUARD: Assert admin account is active before token issuance
+    assertAccountActive(user);
 
     sendToken(user, 200, res, req);
   }
@@ -286,9 +315,12 @@ export const resetPassword = catchAsyncErrors(
     const user = await User.findOne({
       resetPasswordToken,
       resetPasswordExpire: { $gt: new Date() },
-    });
+    }).select("+isActive +isBlocked +status");
 
     if (!user) return next(new ErrorHandler("Reset password token is invalid or expired", 400));
+
+    // 🔒 SECURITY GUARD: Assert user account is active before updating password & issuing token
+    assertAccountActive(user);
 
     user.password = password;
     user.resetPasswordToken = undefined;
@@ -803,6 +835,9 @@ export const socialLogin = catchAsyncErrors(
     }
 
     const user = await authenticateSocialUser("google", token, role);
+
+    // 🔒 SECURITY GUARD: Assert user account is active before token issuance
+    assertAccountActive(user);
 
     sendToken(user, 200, res, req);
   }

@@ -8,7 +8,7 @@ import adminRoutes from "./adminRoute";
 import paymentRoutes from "./paymentRoute";
 import blogRoutes from "./blogRoute";
 import newsletterRoutes from "./newsletterRoute";
-import cartWishlistRouter from "./cartWishlistRoutes";
+import cartWishlistRouter, { cartRouter, wishlistRouter } from "./cartWishlistRoutes";
 import dashboardRoutes from "./dashboardRoutes";
 import couponRoutes from "./couponRoute";
 import bulkOrderRoutes from "./bulkOrderRoute";
@@ -17,8 +17,7 @@ import authRoutes from "./authRoute";
 import taxRoutes from "./taxRoute";
 import commissionRoutes from "./commissionRoute";
 import claimRoutes from "./claimRoutes";
-import returnRequestRoutes from "./returnRequestRoute";
-import returnReplacementRoutes from "./returnReplacementRoute";
+import reviewRoutes, { adminReviewRouter } from "./reviewRoute";
 
 const mainRouter = express.Router();
 
@@ -52,6 +51,8 @@ mainRouter.use("/nursery", nurseryRoutes);
 mainRouter.use("/vendors", nurseryProfileRoutes);
 
 // 🛡️ Admin Verification & Management Engine
+mainRouter.use("/admin/reviews", adminReviewRouter);
+mainRouter.use("/reviews", reviewRoutes);
 mainRouter.use("/admin", adminRoutes);
 
 // 💳 Razorpay Payments Gateway & Webhook Security handling
@@ -65,14 +66,21 @@ mainRouter.use("/marketing", blogRoutes);
 // 📧 Newsletter subscription management & admin dashboard access
 mainRouter.use("/newsletter", newsletterRoutes);
 
-// 🛒 Cart and Wishlist management routes (Live Inventory Sync)
-mainRouter.use("/cart", cartWishlistRouter);
-mainRouter.use("/wishlist", cartWishlistRouter);
+// 🛒 E-Commerce Cart & Wishlist Gateway Routes (/shop/cart, /shop/wishlist + legacy aliases)
+mainRouter.use("/shop/cart", cartRouter);
+mainRouter.use("/shop/wishlist", wishlistRouter);
+mainRouter.use("/shop", cartWishlistRouter);
+mainRouter.use("/cart", cartRouter);
+mainRouter.use("/wishlist", wishlistRouter);
 
-// 📊 Dashboard metrics, analytics, inventory charts & financial reports
+// 📊 Dashboard metrics, analytics, inventory charts & financial reports (/dashboard + /admin-dashboard aliases)
 mainRouter.use("/dashboard", dashboardRoutes);
+mainRouter.use("/admin-dashboard", dashboardRoutes);
 
-// 🎟️ Coupons, discount vouchers and automated promotional codes
+// 🎟️ Coupons, discount vouchers and automated promotional codes (/promotions/coupon, /promotions/coupons + legacy aliases)
+mainRouter.use("/promotions/coupon", couponRoutes);
+mainRouter.use("/promotions/coupons", couponRoutes);
+mainRouter.use("/promotions", couponRoutes);
 mainRouter.use("/coupons", couponRoutes);
 mainRouter.use("/coupon", couponRoutes);
 

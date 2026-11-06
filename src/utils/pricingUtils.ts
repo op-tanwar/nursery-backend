@@ -127,6 +127,8 @@ export interface AuthoritativeTotals {
   itemTaxSnapshots: ItemTaxCalculation[];
 }
 
+import { resolveItemTaxConfig, normalizeTaxCategory } from "./taxService";
+
 /**
  * Authoritatively compute full order financial breakdown from fresh catalog items
  * with dynamic category-wise GST configuration.
@@ -140,8 +142,10 @@ export const calculateAuthoritativeTotals = (
     modelName?: string;
     category?: string;
     isTaxInclusive?: boolean;
+    _id?: any;
+    productId?: any;
   }>,
-  taxMap?: Record<string, { category: string; itemModel?: string; taxPercentage: number; isTaxInclusive: boolean }>
+  taxMap?: Record<string, { category: string; itemModel?: string; slug?: string; taxPercentage: number; isTaxInclusive: boolean }>
 ): AuthoritativeTotals => {
   let originalItemsPricePaise = 0;
   let itemsPricePaise = 0;
@@ -162,46 +166,23 @@ export const calculateAuthoritativeTotals = (
     originalItemsPricePaise += toPaise(origPrice) * qty;
     itemsPricePaise += toPaise(effPrice) * qty;
 
-    // Resolve tax configuration by itemModel, modelName, or category
-    const modelKey = item.itemModel || item.modelName || "";
-    const catKey = item.category || "";
+    // Standardized deterministic tax resolution (O(1) lookup, no loose substring matches)
+    const rawIdentifier = item.category || item.itemModel || item.modelName || "";
+    const resolvedConfig = resolveItemTaxConfig(
+      rawIdentifier,
+      taxMap as any,
+      item._id || item.productId
+    );
 
-    // 1. Direct match by exact or lowercase key
-    let taxConfig =
-      taxMap &&
-      (taxMap[modelKey] ||
-        taxMap[catKey] ||
-        taxMap[modelKey.toLowerCase()] ||
-        taxMap[catKey.toLowerCase()]);
-
-    // 2. Intelligent keyword match (e.g., "Indoor Plants" -> "Plants", "Ceramic Pots" -> "Pots")
-    if (!taxConfig && taxMap) {
-      const lowerCat = catKey.toLowerCase();
-      const lowerModel = modelKey.toLowerCase();
-      for (const [key, conf] of Object.entries(taxMap)) {
-        const lowerKey = key.toLowerCase();
-        if (
-          (lowerCat && (lowerCat.includes(lowerKey) || lowerKey.includes(lowerCat))) ||
-          (lowerModel && (lowerModel.includes(lowerKey) || lowerKey.includes(lowerModel)))
-        ) {
-          taxConfig = conf;
-          break;
-        }
-      }
-    }
-
-    // 3. Fallback to statutory default (18% exclusive)
-    if (!taxConfig) {
-      taxConfig = {
-        category: catKey || modelKey || "General",
-        taxPercentage: 18,
-        isTaxInclusive: false,
-      };
-    }
+    let taxConfig = {
+      category: resolvedConfig.category,
+      taxPercentage: resolvedConfig.taxPercentage,
+      isTaxInclusive: resolvedConfig.isTaxInclusive,
+    };
 
     // Allow explicit item-level isTaxInclusive override if present
     if (typeof item.isTaxInclusive === "boolean") {
-      taxConfig = { ...taxConfig, isTaxInclusive: item.isTaxInclusive };
+      taxConfig.isTaxInclusive = item.isTaxInclusive;
     }
 
     const itemTax = calculateItemTax(effPrice, qty, taxConfig);

@@ -2,7 +2,7 @@ import Redis, { RedisOptions } from "ioredis";
 import crypto from "node:crypto";
 
 // ======================================================================
-// ⚙️ 1. REDIS CLIENT CONFIGURATION & FACTORY
+// ⚙️ 1. REDIS CLIENT CONFIGURATION, SANITIZATION & FACTORY
 // ======================================================================
 
 let redisClient: Redis | null = null;
@@ -12,7 +12,84 @@ let isReady = false;
 // In-memory fallback map for distributed locks if Redis is unreachable
 const inMemoryLocks = new Map<string, { token: string; expiresAt: number }>();
 
-const getRedisOptions = (): RedisOptions => {
+export interface SanitizedRedisConfig {
+  url: string;
+  isTls: boolean;
+  maskedUrl: string;
+}
+
+/**
+ * Safely masks secrets/passwords inside Redis connection URIs for logs.
+ */
+export function maskRedisUri(uri: string): string {
+  if (!uri || typeof uri !== "string") return "";
+  try {
+    const parsed = new URL(uri);
+    if (parsed.password) {
+      parsed.password = "******";
+    }
+    return parsed.toString();
+  } catch {
+    return uri.replace(/:([^@\s/]+)@/, ":******@");
+  }
+}
+
+/**
+ * Robust URI sanitizer that handles developer/CLI copy-paste mistakes:
+ * - Extracts URI from raw CLI commands: `redis-cli --tls -u redis://...`
+ * - Upgrades `redis://` to `rediss://` when `--tls` flag or TLS mode is indicated
+ * - Validates protocol with native URL constructor (`redis:` / `rediss:`)
+ * - Logs structured error if malformed
+ */
+export function sanitizeRedisUrl(rawInput?: string): SanitizedRedisConfig | null {
+  if (!rawInput || typeof rawInput !== "string") {
+    return null;
+  }
+
+  const trimmed = rawInput.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  // Check if string contains raw CLI prefixes or arguments
+  const hasTlsFlag = /--tls/i.test(trimmed);
+
+  // Extract URI match (supports surrounding quotes or CLI flags like -u)
+  const match = trimmed.match(/(rediss?:\/\/[^\s"']+)/i);
+  let extractedUri = match ? match[1] : trimmed.replace(/^["']|["']$/g, "").trim();
+
+  // If TLS flag was explicitly passed but URI starts with redis://, elevate protocol to rediss://
+  if (hasTlsFlag && extractedUri.toLowerCase().startsWith("redis://")) {
+    extractedUri = "rediss://" + extractedUri.slice("redis://".length);
+  }
+
+  // Validate via native URL constructor
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(extractedUri);
+  } catch (err: any) {
+    const masked = maskRedisUri(extractedUri);
+    console.error(`🚨 [RedisConfig] Invalid Redis URI format: ${masked} (${err.message})`);
+    return null;
+  }
+
+  const protocol = parsedUrl.protocol.toLowerCase();
+  if (protocol !== "redis:" && protocol !== "rediss:") {
+    const masked = maskRedisUri(extractedUri);
+    console.error(`🚨 [RedisConfig] Unsupported Redis protocol "${protocol}" in URI: ${masked}`);
+    return null;
+  }
+
+  const isTls = protocol === "rediss:" || hasTlsFlag || process.env.REDIS_TLS === "true";
+
+  return {
+    url: extractedUri,
+    isTls,
+    maskedUrl: maskRedisUri(extractedUri),
+  };
+}
+
+const getRedisOptions = (isTls = false): RedisOptions => {
   const options: RedisOptions = {
     lazyConnect: true,
     enableOfflineQueue: false,
@@ -29,7 +106,7 @@ const getRedisOptions = (): RedisOptions => {
   };
 
   // Support TLS (e.g. rediss:// on AWS ElastiCache / Render / Upstash)
-  if (process.env.REDIS_TLS === "true") {
+  if (isTls || process.env.REDIS_TLS === "true") {
     options.tls = {};
   }
 
@@ -49,13 +126,29 @@ const getRedisOptions = (): RedisOptions => {
 };
 
 export const createRedisInstance = (): Redis => {
-  const options = getRedisOptions();
-  const redisUrl = process.env.REDIS_URL;
+  const rawRedisUrl = process.env.REDIS_URL;
 
   let client: Redis;
-  if (redisUrl) {
-    client = new Redis(redisUrl, options);
+
+  if (rawRedisUrl) {
+    const sanitized = sanitizeRedisUrl(rawRedisUrl);
+
+    if (sanitized) {
+      const options = getRedisOptions(sanitized.isTls);
+      client = new Redis(sanitized.url, options);
+    } else {
+      console.warn(
+        `⚠️ [RedisConfig] Unable to sanitize REDIS_URL. Falling back to host/port configuration.`
+      );
+      const options = getRedisOptions(process.env.REDIS_TLS === "true");
+      client = new Redis({
+        host: process.env.REDIS_HOST || "127.0.0.1",
+        port: Number(process.env.REDIS_PORT) || 6379,
+        ...options,
+      });
+    }
   } else {
+    const options = getRedisOptions(process.env.REDIS_TLS === "true");
     client = new Redis({
       host: process.env.REDIS_HOST || "127.0.0.1",
       port: Number(process.env.REDIS_PORT) || 6379,
@@ -89,7 +182,8 @@ export const initRedis = async (): Promise<boolean> => {
 
     redisClient.on("error", (err) => {
       isReady = false;
-      console.warn("⚠️ [Redis] Client error (operating in fallback mode):", err.message);
+      const sanitizedMsg = maskRedisUri(err.message || String(err));
+      console.warn("⚠️ [Redis] Client error (operating in fallback mode):", sanitizedMsg);
     });
 
     redisClient.on("close", () => {
@@ -105,8 +199,9 @@ export const initRedis = async (): Promise<boolean> => {
     return true;
   } catch (err: any) {
     isReady = false;
+    const sanitizedMsg = maskRedisUri(err?.message || String(err));
     console.warn(
-      `⚠️ [Redis] Could not establish connection (${err?.message || err}). Falling back to in-memory mode.`
+      `⚠️ [Redis] Could not establish connection (${sanitizedMsg}). Falling back to in-memory mode.`
     );
     return false;
   }
@@ -150,7 +245,8 @@ export const getRedisSubscriber = (): Redis | null => {
     try {
       redisSubscriber = createRedisInstance();
       redisSubscriber.on("error", (err) => {
-        console.warn("⚠️ [Redis Subscriber] Error:", err.message);
+        const sanitizedMsg = maskRedisUri(err.message || String(err));
+        console.warn("⚠️ [Redis Subscriber] Error:", sanitizedMsg);
       });
       redisSubscriber.connect().catch(() => {});
     } catch (_) {}

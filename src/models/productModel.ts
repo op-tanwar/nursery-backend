@@ -1,5 +1,13 @@
 import mongoose, { Schema, Document, Model, Types } from "mongoose";
 import { handleDocumentSlug } from "../utils/slugify";
+import {
+  SHIPPING_TYPES,
+  ShippingType,
+  resolveProductShippingType,
+} from "../utils/pincodeService";
+import { normalizeCategorySlug } from "../constants/categories";
+
+export { SHIPPING_TYPES, ShippingType };
 
 // ======================================================================
 // 🏷️ 1. ENUMS & CATEGORY-SPECIFIC ATTRIBUTE INTERFACES
@@ -8,10 +16,12 @@ import { handleDocumentSlug } from "../utils/slugify";
 export const PRODUCT_CATEGORIES = [
   "plants",
   "pots",
+  "pots-planters",
   "accessories",
   "gardening-tools",
   "plant-care",
   "seeds-bulbs",
+  "plant-stands-shelves",
   "stands-shelves",
   "artificial-dried",
 ] as const;
@@ -108,6 +118,8 @@ export type CategoryAttributes =
 // 🧱 2. REVIEW & MEDIA TYPES
 // ======================================================================
 
+export type ReviewStatus = "pending" | "approved" | "flagged" | "rejected";
+
 export interface IProductReview {
   _id?: Types.ObjectId;
   name: string;
@@ -115,6 +127,7 @@ export interface IProductReview {
   comment: string;
   user?: Types.ObjectId;
   isVerifiedBuyer?: boolean;
+  status?: ReviewStatus;
   createdAt?: Date;
 }
 
@@ -132,6 +145,7 @@ export interface IProduct extends Document {
   slug: string;
   slugHistory: string[];
   category: ProductCategory;
+  shippingType?: ShippingType;
   nursery: Types.ObjectId;
   price: number;
   discountPrice: number;
@@ -170,7 +184,13 @@ const reviewSchema = new Schema<IProductReview>(
     rating: { type: Number, required: true, min: 1, max: 5 },
     comment: { type: String, required: true, trim: true },
     user: { type: Schema.Types.ObjectId, ref: "User" },
-    isVerifiedBuyer: { type: Boolean, default: true },
+    isVerifiedBuyer: { type: Boolean, default: false },
+    status: {
+      type: String,
+      enum: ["pending", "approved", "flagged", "rejected"],
+      default: "approved",
+      index: true,
+    },
     createdAt: { type: Date, default: Date.now },
   },
   { _id: true }
@@ -211,6 +231,15 @@ const productSchema = new Schema<IProduct>(
         values: PRODUCT_CATEGORIES,
         message: "Invalid product category: `{VALUE}`",
       },
+      index: true,
+    },
+    shippingType: {
+      type: String,
+      enum: {
+        values: SHIPPING_TYPES,
+        message: "Invalid shippingType: `{VALUE}`",
+      },
+      default: "HYPERLOCAL_EXPRESS",
       index: true,
     },
     nursery: {
@@ -334,6 +363,19 @@ productSchema.pre("validate", function () {
     this.ratingsQuantity = this.numOfReviews;
   }
 
+  // Synchronize backward-compatibility category and canonicalize slug
+  if (this.category) {
+    const canonical = normalizeCategorySlug(this.category);
+    if (canonical) {
+      this.category = canonical;
+    }
+  }
+
+  // Authoritatively derive shippingType if not explicitly set
+  if (!this.shippingType) {
+    this.shippingType = resolveProductShippingType({ category: this.category });
+  }
+
   // Ensure coverImage exists if images array has items
   if ((!this.coverImage || !this.coverImage.url) && this.images && this.images.length > 0) {
     this.coverImage = this.images[0];
@@ -369,6 +411,10 @@ productSchema.index({ name: 1 });
 
 // Full text search index across title and description:
 productSchema.index({ name: "text", description: "text" });
+
+// Reviews lookup and moderation indexing:
+productSchema.index({ "reviews._id": 1 });
+productSchema.index({ "reviews.status": 1, "reviews.createdAt": -1 });
 
 const Product: Model<IProduct> = mongoose.model<IProduct>("Product", productSchema);
 export default Product;

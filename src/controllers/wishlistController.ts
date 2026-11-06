@@ -7,6 +7,7 @@ import Product from "../models/productModel";
 import { IWishlistDocument } from "../types/cartWishlist.types";
 import cacheManager from "../utils/cacheManager";
 import { getActiveNurseryIds, ACTIVE_NURSERIES_CACHE_KEY } from "./cartController";
+import { resolveProductCommissionType } from "../utils/productRegistry";
 
 // 💚 1. TOGGLE WISHLIST ITEM
 export const toggleWishlistItem = catchAsyncErrors(
@@ -34,7 +35,7 @@ export const toggleWishlistItem = catchAsyncErrors(
     if (!wishlist) {
       const newWishlist = await Wishlist.create({
         user: userId,
-        items: [{ product: productId, itemModel: "Product" }]
+        items: [{ product: productId, itemModel: resolveProductCommissionType(product) }]
       });
 
       const populatedWishlist = await Wishlist.findById(newWishlist._id).populate({
@@ -50,7 +51,7 @@ export const toggleWishlistItem = catchAsyncErrors(
     if (itemIndex > -1) {
       wishlist.items.splice(itemIndex, 1);
     } else {
-      wishlist.items.push({ product: productId, itemModel: "Product" });
+      wishlist.items.push({ product: productId, itemModel: resolveProductCommissionType(product) });
     }
 
     await wishlist.save();

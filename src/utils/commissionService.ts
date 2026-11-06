@@ -365,3 +365,5 @@ export const getEffectiveCommissionRate = async (
   const result = await getEffectiveCommission(nurseryIdOrProfile, categoryOrModel);
   return result.rate;
 };
+
+export { resolveProductCommissionType } from "./productRegistry";

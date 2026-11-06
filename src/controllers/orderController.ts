@@ -106,8 +106,12 @@ export const createNewOrder = catchAsyncErrors(
     if (result.status === "UNSERVICEABLE") {
       return res.status(400).json({
         status: "fail",
-        message: "Delivery not available for some items at your pincode",
+        message:
+          result.message ||
+          "Delivery not available for some items at your pincode. Your payment has been refunded to source.",
         unserviceableItems: result.unserviceableItems,
+        refunded: Boolean(result.refunded),
+        refundId: result.refundId,
       });
     }
 

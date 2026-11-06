@@ -14,9 +14,23 @@ import {
   updateBulkOrderStatus,
   deleteBulkOrder,
 } from "../controllers/bulkOrderController";
+import { getAdminDashboardStats } from "../controllers/dashboardController";
+import { adminReviewRouter } from "./reviewRoute";
 import { isAuthenticatedUser, authorizeRoles } from "../middleware/auth";
 
 const router = express.Router();
+
+// ======================================================================
+// 📊 ADMIN DASHBOARD STATS AGGREGATE ALIAS (`/api/v1/admin/stats`)
+// ======================================================================
+router
+  .route(["/stats", "/dashboard-stats", "/dashboard"])
+  .get(isAuthenticatedUser, authorizeRoles("admin"), getAdminDashboardStats);
+
+// ======================================================================
+// ⭐ ADMIN REVIEWS MODERATION QUEUE (`/api/v1/admin/reviews`)
+// ======================================================================
+router.use("/reviews", adminReviewRouter);
 
 // ======================================================================
 // 📦 ADMIN BULK ORDERS MANAGEMENT (`/api/v1/admin/bulk-orders`)

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import ErrorHandler from "../utils/errorHandler";
+const AppError = ErrorHandler;
 import Order from "../models/orderModel";
 import TransactionLedger from "../models/transactionLedgerModel";
 import StockReservation from "../models/stockReservationModel";
@@ -27,6 +28,7 @@ import Product from "../models/productModel";
 import {
   getCaseInsensitiveModel,
   resolveProductAndModel,
+  resolveProductCommissionType,
 } from "../utils/productRegistry";
 import {
   getEffectivePrice,
@@ -111,14 +113,16 @@ export const createRazorpayOrder = catchAsyncErrors(
       }
 
       const quantity = Math.max(1, Number(item.quantity) || 1);
-      const { product: dbProduct, modelName } = await resolveProductAndModel(
+      const { product: dbProduct, modelName: rawModelName } = await resolveProductAndModel(
         String(targetId),
         item.itemModel
       );
 
-      if (!dbProduct || !modelName) {
+      if (!dbProduct || !rawModelName) {
         return next(new ErrorHandler(`Product mismatch error context for ID: ${targetId}`, 404));
       }
+
+      const modelName = resolveProductCommissionType(dbProduct, rawModelName || item.itemModel);
 
       if (dbProduct.isActive === false) {
         return next(new ErrorHandler(`Product "${dbProduct.name}" is currently inactive and cannot be ordered.`, 400));
@@ -209,6 +213,9 @@ export const createRazorpayOrder = catchAsyncErrors(
         productId: String(ai.product._id),
         productName: ai.product.name,
         nurseryId: ai.product.nursery ? ai.product.nursery.toString() : null,
+        category: ai.product.category,
+        itemModel: (ai.product as any).itemModel || ai.modelName,
+        shippingType: (ai.product as any).shippingType,
       }));
 
       const serviceability = await checkCartItemsPincodeServiceability(
@@ -393,10 +400,77 @@ export const verifyPayment = catchAsyncErrors(
     }
 
     if (result.status === "UNSERVICEABLE") {
+      // 🛡️ Secondary Defensive Check: Guarantee refund if not already processed in service layer
+      if (!result.refunded && paymentInfo?.razorpay_payment_id) {
+        const destPincode = String(
+          shippingInfo?.pinCode ||
+          shippingInfo?.pincode ||
+          shippingAddress?.pinCode ||
+          shippingAddress?.pincode ||
+          pincode ||
+          pinCode ||
+          ""
+        ).trim();
+
+        try {
+          const existingLedger = await TransactionLedger.findOne({
+            entryType: "FALLBACK_REFUND",
+            "metadata.razorpayPaymentId": paymentInfo.razorpay_payment_id,
+          });
+
+          if (!existingLedger) {
+            const razorpay = getRazorpayInstance();
+            const rzpOrder = await razorpay.orders.fetch(paymentInfo.razorpay_order_id);
+            const amountPaise = Number(rzpOrder.amount);
+
+            if (amountPaise > 0) {
+              const refundRes = await processFallbackRefund({
+                razorpayPaymentId: paymentInfo.razorpay_payment_id,
+                razorpayOrderId: paymentInfo.razorpay_order_id,
+                amountPaise,
+                userId: req.user?._id,
+                customerEmail: req.user?.email,
+                customerName: req.user?.name,
+                reason: `Automatic refund: Pincode ${destPincode || "unknown"} is unserviceable post-capture`,
+                metadata: {
+                  destinationPincode: destPincode,
+                  unserviceableItems: result.unserviceableItems,
+                },
+              });
+
+              if (refundRes.success) {
+                console.log("✅ [FallbackRefund Audit] paymentController fallback refund succeeded:", {
+                  paymentId: paymentInfo.razorpay_payment_id,
+                  orderId: paymentInfo.razorpay_order_id,
+                  pincode: destPincode,
+                  amount: toRupees(amountPaise),
+                  refundId: refundRes.refundId,
+                });
+                result.refunded = true;
+                result.refundId = refundRes.refundId;
+                result.message = `Delivery is not available for some items at pincode ${destPincode}. Your payment of ₹${toRupees(amountPaise)} has been automatically refunded to your original payment method (Refund ID: ${refundRes.refundId}).`;
+              } else {
+                console.error("🚨 [CRITICAL] [FallbackRefund Audit] paymentController fallback refund failed:", {
+                  paymentId: paymentInfo.razorpay_payment_id,
+                  orderId: paymentInfo.razorpay_order_id,
+                  error: refundRes.error,
+                });
+              }
+            }
+          }
+        } catch (ctrlRefundErr: any) {
+          console.error("🚨 [CRITICAL] paymentController fallback refund exception:", ctrlRefundErr);
+        }
+      }
+
       return res.status(400).json({
         status: "fail",
-        message: "Delivery not available for some items at your pincode",
+        message:
+          result.message ||
+          "Delivery not available for some items at your pincode. Your payment has been refunded to source.",
         unserviceableItems: result.unserviceableItems,
+        refunded: Boolean(result.refunded),
+        refundId: result.refundId,
       });
     }
 
@@ -420,21 +494,25 @@ export const verifyPayment = catchAsyncErrors(
 // 🪝 3. CRITICAL ASYNCHRONOUS TRANSACTION WEBHOOK INVENTORY MANAGER
 // ======================================================================
 export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  let bodyData: any = null;
+  let isOrderCommitted = false;
+  let razorpayPaymentId = "";
+  let razorpayOrderId = "";
+  let exactAmountPaidPaise = 0;
+  let shippingInfo: any = null;
+  let userId = "";
+  let verifiedOrderItems: any[] = [];
 
   try {
+    // 🛡️ 1. Cryptographic Signature Validation (Pre-Transaction)
     const signature = req.headers["x-razorpay-signature"] as string;
     if (!signature) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({ message: "Missing Razorpay verification credentials header." });
     }
 
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
     if (!secret) {
-      await session.abortTransaction();
-      session.endSession();
+      console.error("🚨 [Webhook Configuration] RAZORPAY_WEBHOOK_SECRET is uninitialized.");
       return res.status(500).json({ message: "Webhook configuration variable stream uninitialized." });
     }
 
@@ -442,8 +520,6 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
     const payload = req.rawBody || (typeof req.body === "string" ? req.body : JSON.stringify(req.body));
 
     if (!payload) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({ message: "Webhook payload body data empty." });
     }
 
@@ -456,34 +532,76 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
       bufferExpected.length !== bufferReceived.length ||
       !crypto.timingSafeEqual(bufferExpected, bufferReceived)
     ) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({ message: "Invalid signature validation failed" });
     }
 
-    const bodyData = typeof payload === "string" ? JSON.parse(payload) : payload;
+    bodyData = typeof payload === "string" ? JSON.parse(payload) : payload;
 
-    if (bodyData.event === "order.paid") {
-      const paymentEntity = bodyData.payload.payment.entity;
-      const orderEntity = bodyData.payload.order.entity;
-      const checkoutNotes = orderEntity.notes || {};
+    // 🛡️ 2. Route Events
+    if (bodyData.event === "payment.failed") {
+      const paymentEntity = bodyData.payload?.payment?.entity;
+      const orderEntity = bodyData.payload?.order?.entity;
+      const orderId = paymentEntity?.order_id || orderEntity?.id;
 
-      // Check for an already established order entity context (Idempotency)
-      const existingOrder = await Order.findOne({ "paymentInfo.id": paymentEntity.id }).session(session);
-      if (existingOrder) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(200).json({ status: "ok", message: "Duplicate event handled safely." });
+      // 🔓 Immediately release any pending stock reservation for this failed order
+      if (orderId) {
+        await releaseStockReservation(orderId, "PAYMENT_FAILED_WEBHOOK");
       }
+
+      if (paymentEntity?.email) {
+        const customerName = paymentEntity.notes?.customerName || "Customer";
+        const frontendUrl = process.env.FRONTEND_URL?.trim() || "http://localhost:3000";
+        const retryUrl = `${frontendUrl.replace(/\/+$/, "")}/checkout`;
+
+        sendEmail({
+          email: paymentEntity.email,
+          subject: `⚠️ Payment Failed for Order #${orderId || "PENDING"} — Urban Nursery`,
+          message: `Hi ${customerName}, your payment could not be processed. Please retry checkout.`,
+          html: getPaymentFailedHtml(customerName, orderId || "PENDING", retryUrl),
+        }).catch((err) =>
+          console.error("❌ [Email Trigger Failed] Event: PaymentFailed, Error:", err?.message)
+        );
+      }
+
+      return res.status(200).json({ status: "ok" });
+    }
+
+    if (bodyData.event !== "order.paid") {
+      return res.status(200).json({ status: "ok", message: `Event ${bodyData.event} ignored.` });
+    }
+
+    // 🛡️ 3. Process "order.paid" Event Context
+    const paymentEntity = bodyData.payload.payment.entity;
+    const orderEntity = bodyData.payload.order.entity;
+    const checkoutNotes = orderEntity.notes || {};
+    razorpayPaymentId = paymentEntity.id;
+    razorpayOrderId = orderEntity.id;
+    exactAmountPaidPaise = Number(orderEntity.amount_paid || paymentEntity.amount || 0);
+
+    // Idempotency Guard (Pre-Transaction)
+    const existingOrder = await Order.findOne({
+      $or: [
+        { "paymentInfo.id": razorpayPaymentId },
+        { "paymentInfo.orderId": razorpayOrderId },
+      ],
+    });
+    if (existingOrder) {
+      console.log(`ℹ️ [Webhook] Duplicate order.paid event for payment ${razorpayPaymentId}. Order #${existingOrder._id} already exists.`);
+      return res.status(200).json({ status: "ok", message: "Duplicate event handled safely." });
+    }
+
+    // 🔒 4. Execute Unified Transaction Flow (Graceful Standalone Fallback)
+    const transactionResult = await withTransaction(async (session) => {
+      const sessionOpts = session ? { session } : {};
 
       // 🔍 1. Retrieve authoritative order context from StockReservation in MongoDB
       const reservation = await StockReservation.findOne({
         razorpayOrderId: orderEntity.id,
-      }).session(session);
+      }).session(session || null);
 
-      let shippingInfo: any = reservation?.shippingInfo || null;
+      shippingInfo = reservation?.shippingInfo || null;
       let rawOrderItems: any[] = [];
-      let userId: string = (reservation?.userId ? reservation.userId.toString() : "") || checkoutNotes.userId || paymentEntity.notes?.userId || "";
+      userId = (reservation?.userId ? reservation.userId.toString() : "") || checkoutNotes.userId || paymentEntity.notes?.userId || "";
 
       if (reservation && reservation.items && reservation.items.length > 0) {
         rawOrderItems = reservation.items.map((it: any) => ({
@@ -518,18 +636,13 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
       }
 
       if (!shippingInfo || !rawOrderItems || rawOrderItems.length === 0 || !userId) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({
-          status: "failed",
-          message: "Webhook missing required order context (reservation record or tracking notes not found).",
-        });
+        throw new AppError("Webhook missing required order context (reservation record or tracking notes not found).", 400);
       }
 
       const taxMap = await getActiveTaxMap();
 
-      // 🔒 RECOMPUTE REAL-TIME LINE ITEMS FROM DATABASE DIRECTLY
-      const verifiedOrderItems: any[] = [];
+      // 🔒 Recompute line items from database
+      verifiedOrderItems = [];
       const authoritativePriceItems: Array<{
         price: number;
         discountPrice?: number;
@@ -544,16 +657,16 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
         const targetId = item.productId || item.item || item.id || item._id;
         const quantity = Math.max(1, Number(item.quantity) || 1);
 
-        const { product: dbProduct, modelName } = await resolveProductAndModel(
+        const { product: dbProduct, modelName: rawModelName } = await resolveProductAndModel(
           String(targetId),
           item.itemModel
         );
 
-        if (!dbProduct || !modelName || dbProduct.isActive === false) {
-          await session.abortTransaction();
-          session.endSession();
-          return res.status(400).json({ status: "failed", message: "Product context verification failed." });
+        if (!dbProduct || !rawModelName || dbProduct.isActive === false) {
+          throw new AppError("Product context verification failed.", 400);
         }
+
+        const modelName = resolveProductCommissionType(dbProduct, rawModelName || item.itemModel);
 
         authoritativePriceItems.push({
           price: dbProduct.price,
@@ -568,12 +681,57 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
 
       const authoritativeTotals = calculateAuthoritativeTotals(authoritativePriceItems, taxMap);
 
-      // ⚡ INTERCEPT AMOUNT MANIPULATION: Cross check physical payment with catalog truth
-      const exactAmountPaidPaise = Number(orderEntity.amount_paid);
-      if (exactAmountPaidPaise < authoritativeTotals.totalPricePaise) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({ status: "failed", message: "Critical Price Discrepancy Exception: Underpayment detected relative to catalog truth." });
+      // 🎟️ Extract & validate coupon discount applied at checkout
+      const rawCouponCode = String(
+        checkoutNotes.couponCode || paymentEntity.notes?.couponCode || ""
+      ).trim();
+      const sanitizedCouponCode = rawCouponCode ? rawCouponCode.toUpperCase().trim() : undefined;
+      let appliedCouponCode: string | undefined = undefined;
+      let couponDiscountAmount = 0;
+
+      if (sanitizedCouponCode) {
+        try {
+          const verifiedCoupon = await verifyCouponInternal(
+            sanitizedCouponCode,
+            authoritativeTotals.itemsPrice,
+            userId,
+            session
+          );
+          appliedCouponCode = verifiedCoupon.couponCode.toUpperCase().trim();
+          couponDiscountAmount = verifiedCoupon.discountAmount;
+          console.log(`🎟️ [Coupon Audit] Authoritatively validated Coupon "${appliedCouponCode}" for Razorpay Order "${orderEntity.id}". Discount: ₹${couponDiscountAmount}, User: "${userId}"`);
+        } catch (couponErr: any) {
+          console.warn(`⚠️ [Webhook] Server coupon re-validation notice for "${sanitizedCouponCode}": ${couponErr?.message}`);
+          const notesDiscount = Number(checkoutNotes.couponDiscount || paymentEntity.notes?.couponDiscount || 0);
+          if (!isNaN(notesDiscount) && notesDiscount > 0) {
+            appliedCouponCode = sanitizedCouponCode;
+            couponDiscountAmount = notesDiscount;
+            console.log(`🎟️ [Coupon Audit] Honoring checkout-authorized discount for Coupon "${appliedCouponCode}". Discount: ₹${couponDiscountAmount}, Razorpay Order: "${orderEntity.id}"`);
+          } else {
+            console.error(`❌ [Webhook] Coupon "${sanitizedCouponCode}" invalid and no valid notes discount recorded.`);
+            throw new AppError(`Payment verification failed: Coupon "${sanitizedCouponCode}" is invalid or expired`, 400);
+          }
+        }
+      }
+
+      authoritativeTotals.discountAmount = couponDiscountAmount;
+
+      // ⚡ Intercept amount manipulation: cross-check physical payment with net payable total
+      const discountPaise = Math.round((authoritativeTotals.discountAmount || 0) * 100);
+      const netPayablePaise = authoritativeTotals.totalPricePaise - discountPaise;
+      const expectedPayablePaise = discountPaise > 0 && netPayablePaise < 100 ? 100 : netPayablePaise;
+
+      if (exactAmountPaidPaise < expectedPayablePaise) {
+        console.error("❌ [Webhook Discrepancy] Critical Price Discrepancy: Amount paid is less than net payable total", {
+          receivedPaise: exactAmountPaidPaise,
+          expectedPaise: expectedPayablePaise,
+          razorpayOrderId: orderEntity.id,
+          razorpayPaymentId: paymentEntity.id,
+          couponCode: appliedCouponCode || rawCouponCode || null,
+          discountPaise,
+          discrepancyPaise: expectedPayablePaise - exactAmountPaidPaise,
+        });
+        throw new AppError("Payment verification failed: Amount paid is less than net payable total", 400);
       }
 
       for (let i = 0; i < rawItemsCache.length; i++) {
@@ -615,27 +773,19 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
         });
       }
 
-      // 🔍 5. STOCK RESERVATION STATUS EVALUATION
-      const isReservationPending =
-        reservation && reservation.status === "PENDING";
-
-      // 🛒 TRANSACTIONAL STOCK LOCK DOWN
+      // 🔍 5. Stock Reservation Status Evaluation
+      const isReservationPending = reservation && reservation.status === "PENDING";
       const lowStockAlertItems: { nurseryId?: string; name: string; stock: number }[] = [];
 
       if (isReservationPending) {
         // 🔒 PATH A: Active reservation — commit atomically
         const commitRes = await commitStockReservation(orderEntity.id, session);
         if (!commitRes.success && commitRes.status !== "ALREADY_COMMITTED") {
-          await session.abortTransaction();
-          session.endSession();
-          return res.status(500).json({
-            status: "failed",
-            message: "Failed to commit stock reservation.",
-          });
+          throw new AppError("Failed to commit stock reservation.", 500);
         }
 
         for (const item of verifiedOrderItems) {
-          const productDoc = await Product.findById(item.item).session(session);
+          const productDoc = await Product.findById(item.item).session(session || null);
           if (
             productDoc &&
             typeof productDoc.stock === "number" &&
@@ -670,7 +820,7 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
               },
             },
             { $inc: { stock: -Number(item.quantity) } },
-            { new: true, session }
+            { new: true, ...sessionOpts }
           );
 
           if (!updatedInventoryItem) {
@@ -691,51 +841,46 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
         }
 
         if (stockDepleted) {
-          await session.abortTransaction();
-          session.endSession();
-
-          // 💸 Automated fallback refund for webhook
-          const refundResult = await processFallbackRefund({
-            razorpayPaymentId: paymentEntity.id,
-            razorpayOrderId: orderEntity.id,
-            amountPaise: exactAmountPaidPaise,
-            userId: userId,
-            customerEmail: paymentEntity.email,
-            customerName: paymentEntity.notes?.customerName || shippingInfo?.name || "Customer",
-            reason: "STOCK_DEPLETED_POST_TTL_WEBHOOK",
-            orderItems: verifiedOrderItems,
-          });
-
-          return res.status(200).json({
-            status: "refunded",
-            refundId: refundResult.refundId,
-            message:
-              "Stock reservation expired and inventory depleted. Fallback refund initiated automatically.",
-          });
+          const depletionErr = new Error("STOCK_DEPLETED_POST_TTL_WEBHOOK");
+          (depletionErr as any).isStockDepleted = true;
+          throw depletionErr;
         }
       }
 
-      // 📝 ATOMICALLY CREATE PLATFORM ORDER RECORD
-      const [newOrder] = await Order.create(
-        [
+      // 📝 Atomically create Platform Order Record
+      const couponCode = appliedCouponCode ? appliedCouponCode.toUpperCase().trim() : undefined;
+      const orderData = {
+        shippingInfo,
+        orderItems: verifiedOrderItems,
+        user: userId,
+        paymentInfo: {
+          id: paymentEntity.id,
+          orderId: orderEntity.id,
+          status: paymentEntity.status || "captured",
+        },
+        itemsPrice: authoritativeTotals.itemsPrice,
+        taxPrice: authoritativeTotals.taxPrice,
+        shippingPrice: authoritativeTotals.shippingPrice,
+        couponCode: couponCode || undefined,
+        discountAmount: toRupees(discountPaise),
+        totalPrice: exactAmountPaidPaise > expectedPayablePaise ? toRupees(exactAmountPaidPaise) : toRupees(expectedPayablePaise),
+        paidAt: new Date(),
+      };
+
+      const [newOrder] = await Order.create([orderData], sessionOpts);
+
+      // 🎟️ Atomically increment coupon usage and record the user ID to prevent unlimited reuse
+      if (couponCode && discountPaise > 0) {
+        const couponUpdateResult = await Coupon.updateOne(
+          { code: couponCode },
           {
-            shippingInfo,
-            orderItems: verifiedOrderItems,
-            user: userId,
-            paymentInfo: {
-              id: paymentEntity.id,
-              orderId: orderEntity.id,
-              status: paymentEntity.status || "captured",
-            },
-            itemsPrice: authoritativeTotals.itemsPrice,
-            taxPrice: authoritativeTotals.taxPrice,
-            shippingPrice: authoritativeTotals.shippingPrice,
-            totalPrice: exactAmountPaidPaise > authoritativeTotals.totalPricePaise ? toRupees(exactAmountPaidPaise) : authoritativeTotals.totalPrice,
-            paidAt: new Date(),
+            $inc: { usedCount: 1 },
+            $addToSet: { usedBy: userId },
           },
-        ],
-        { session }
-      );
+          sessionOpts
+        );
+        console.log(`🎟️ [Coupon Audit] Atomically incremented usage for Coupon "${couponCode}". Razorpay Order: "${orderEntity.id}", Platform Order: "${newOrder._id}", User: "${userId}", Matched: ${couponUpdateResult.matchedCount}, Modified: ${couponUpdateResult.modifiedCount}`);
+      }
 
       // Ledger entries
       const ledgerEntries = verifiedOrderItems.map((item) => ({
@@ -753,103 +898,127 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
           quantity: item.quantity,
         },
       }));
-      await TransactionLedger.insertMany(ledgerEntries, { session });
+      await TransactionLedger.insertMany(ledgerEntries, sessionOpts);
 
-      await session.commitTransaction();
-      session.endSession();
+      return { newOrder, lowStockAlertItems };
+    });
 
-      // Dispatch Notifications
-      const oid = newOrder._id.toString();
-      sendOrderConfirmationEmail(oid).catch((err) =>
-        console.error("❌ [Email Trigger Failed] Event: OrderConfirmation (Webhook), Error:", err?.message)
-      );
-      sendAdminNewOrderEmail(
+    isOrderCommitted = true;
+    const { newOrder, lowStockAlertItems } = transactionResult;
+
+    // Dispatch Notifications (Post-Commit)
+    const oid = newOrder._id.toString();
+    sendOrderConfirmationEmail(oid).catch((err) =>
+      console.error("❌ [Email Trigger Failed] Event: OrderConfirmation (Webhook), Error:", err?.message)
+    );
+    sendAdminNewOrderEmail(
+      oid,
+      newOrder.totalPrice,
+      shippingInfo.name || paymentEntity.notes?.customerName || "Customer",
+      newOrder.orderItems.length
+    ).catch((err) =>
+      console.error("❌ [Email Trigger Failed] Event: AdminNewOrder (Webhook), Error:", err?.message)
+    );
+
+    const nurseryGroupMap = new Map<string, any[]>();
+    newOrder.orderItems.forEach((item: any) => {
+      if (item.nursery) {
+        const nId = item.nursery.toString();
+        if (!nurseryGroupMap.has(nId)) nurseryGroupMap.set(nId, []);
+        nurseryGroupMap.get(nId)!.push(item);
+      }
+    });
+
+    for (const [nurseryId, items] of nurseryGroupMap.entries()) {
+      sendNurseryOrderAlertEmail(
+        nurseryId,
         oid,
-        authoritativeTotals.totalPrice,
-        shippingInfo.name || paymentEntity.notes?.customerName || "Customer",
-        newOrder.orderItems.length
+        items,
+        newOrder.shippingInfo.city,
+        newOrder.shippingInfo.pinCode
       ).catch((err) =>
-        console.error("❌ [Email Trigger Failed] Event: AdminNewOrder (Webhook), Error:", err?.message)
+        console.error("❌ [Email Trigger Failed] Event: NurseryOrderAlert (Webhook), Error:", err?.message)
       );
+    }
 
-      const nurseryGroupMap = new Map<string, any[]>();
-      newOrder.orderItems.forEach((item: any) => {
-        if (item.nursery) {
-          const nId = item.nursery.toString();
-          if (!nurseryGroupMap.has(nId)) nurseryGroupMap.set(nId, []);
-          nurseryGroupMap.get(nId)!.push(item);
-        }
-      });
-
-      for (const [nurseryId, items] of nurseryGroupMap.entries()) {
-        sendNurseryOrderAlertEmail(
-          nurseryId,
-          oid,
-          items,
-          newOrder.shippingInfo.city,
-          newOrder.shippingInfo.pinCode
-        ).catch((err) =>
-          console.error("❌ [Email Trigger Failed] Event: NurseryOrderAlert (Webhook), Error:", err?.message)
-        );
-      }
-
-      if (lowStockAlertItems.length > 0) {
-        (async () => {
-          for (const lItem of lowStockAlertItems) {
-            if (!lItem.nurseryId) continue;
-            try {
-              const vendor = await User.findById(lItem.nurseryId).select("name email").lean();
-              if (vendor?.email) {
-                sendLowStockAlert(vendor.email, (vendor as any).name || "Nursery Owner", lItem.name, lItem.stock).catch((err) =>
-                  console.error("❌ [Email Trigger Failed] Event: LowStockAlert (Webhook), Error:", err?.message)
-                );
-              }
-            } catch (err: any) {
-              console.error("Error looking up vendor for low stock alert:", err?.message);
+    if (lowStockAlertItems.length > 0) {
+      (async () => {
+        for (const lItem of lowStockAlertItems) {
+          if (!lItem.nurseryId) continue;
+          try {
+            const vendor = await User.findById(lItem.nurseryId).select("name email").lean();
+            if (vendor?.email) {
+              sendLowStockAlert(vendor.email, (vendor as any).name || "Nursery Owner", lItem.name, lItem.stock).catch((err) =>
+                console.error("❌ [Email Trigger Failed] Event: LowStockAlert (Webhook), Error:", err?.message)
+              );
             }
+          } catch (err: any) {
+            console.error("Error looking up vendor for low stock alert:", err?.message);
           }
-        })().catch((err) => console.error("Error in low stock background dispatch:", err));
-      }
-    } else if (bodyData.event === "payment.failed") {
-      const paymentEntity = bodyData.payload?.payment?.entity;
-      const orderEntity = bodyData.payload?.order?.entity;
-      const orderId = paymentEntity?.order_id || orderEntity?.id;
-
-      // 🔓 Immediately release any pending stock reservation for this failed order
-      if (orderId) {
-        await releaseStockReservation(orderId, "PAYMENT_FAILED_WEBHOOK");
-      }
-
-      if (paymentEntity?.email) {
-        const customerName = paymentEntity.notes?.customerName || "Customer";
-        const frontendUrl = process.env.FRONTEND_URL?.trim() || "http://localhost:3000";
-        const retryUrl = `${frontendUrl.replace(/\/+$/, "")}/checkout`;
-
-        sendEmail({
-          email: paymentEntity.email,
-          subject: `⚠️ Payment Failed for Order #${orderId || "PENDING"} — Urban Nursery`,
-          message: `Hi ${customerName}, your payment could not be processed. Please retry checkout.`,
-          html: getPaymentFailedHtml(customerName, orderId || "PENDING", retryUrl),
-        }).catch((err) =>
-          console.error("❌ [Email Trigger Failed] Event: PaymentFailed, Error:", err?.message)
-        );
-      }
-
-      await session.commitTransaction();
-      session.endSession();
-    } else {
-      await session.commitTransaction();
-      session.endSession();
+        }
+      })().catch((err) => console.error("Error in low stock background dispatch:", err));
     }
 
     return res.status(200).json({ status: "ok" });
-  } catch (error) {
-    if (session.inTransaction()) {
-      await session.abortTransaction();
+  } catch (error: any) {
+    console.error("Critical Webhook processing error:", error);
+
+    // 💸 Automated fallback refund for stock depletion post-TTL
+    if (error?.isStockDepleted && razorpayPaymentId) {
+      try {
+        const refundResult = await processFallbackRefund({
+          razorpayPaymentId,
+          razorpayOrderId,
+          amountPaise: exactAmountPaidPaise,
+          userId,
+          customerEmail: bodyData?.payload?.payment?.entity?.email,
+          customerName: bodyData?.payload?.payment?.entity?.notes?.customerName || shippingInfo?.name || "Customer",
+          reason: "STOCK_DEPLETED_POST_TTL_WEBHOOK",
+          orderItems: verifiedOrderItems,
+        });
+
+        return res.status(200).json({
+          status: "refunded",
+          refundId: refundResult.refundId,
+          message: "Stock reservation expired and inventory depleted. Fallback refund initiated automatically.",
+        });
+      } catch (depletedRefundErr: any) {
+        console.error("🚨 [CRITICAL] Webhook stock depletion refund error:", depletedRefundErr);
+      }
     }
-    session.endSession();
-    console.error("Critical Webhook processing crash error:", error);
-    return res.status(500).json({ message: "Internal server error during event tracking operations." });
+
+    // 💸 Automated fallback refund if payment was captured on order.paid but order persistence failed
+    if (bodyData?.event === "order.paid" && (razorpayPaymentId || bodyData?.payload?.payment?.entity?.id) && !isOrderCommitted) {
+      const pEntity = bodyData?.payload?.payment?.entity || {};
+      const oEntity = bodyData?.payload?.order?.entity || {};
+      const payId = razorpayPaymentId || pEntity.id;
+      const ordId = razorpayOrderId || oEntity.id || pEntity.order_id;
+      const payAmountPaise = exactAmountPaidPaise || Number(pEntity.amount || oEntity.amount_paid || 0);
+
+      if (payId && payAmountPaise > 0) {
+        try {
+          console.warn(`💸 [Webhook] Triggering automated fallback refund for payment ${payId} due to failure: ${error?.message}`);
+          await processFallbackRefund({
+            razorpayPaymentId: payId,
+            razorpayOrderId: ordId,
+            amountPaise: payAmountPaise,
+            userId: oEntity.notes?.userId || pEntity.notes?.userId || userId,
+            customerEmail: pEntity.email,
+            customerName: pEntity.notes?.customerName || "Customer",
+            reason: `ORDER_PERSISTENCE_FAILED: ${error?.message || "Payment verification failed"}`,
+          });
+        } catch (refundErr: any) {
+          console.error("❌ [Webhook] Automated fallback refund failed in catch handler:", refundErr);
+        }
+      }
+    }
+
+    // Return clean, resilient HTTP 200 response to Razorpay webhook retry system to avoid repeated webhook hammering
+    return res.status(200).json({
+      status: "failed",
+      handled: true,
+      message: error?.message || "Internal server error during event tracking operations.",
+    });
   }
 };
 

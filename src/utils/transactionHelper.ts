@@ -25,18 +25,30 @@ export async function withTransaction<T>(
     await session.commitTransaction();
     return result;
   } catch (err: any) {
-    // "Transaction numbers are only allowed on a replica set member or mongos"
-    // Error code 20 (IllegalOperation) or code 59 (CommandNotFound on older mongo)
+    const errMsg = typeof err?.message === "string" ? err.message : "";
     const isStandaloneError =
       err?.codeName === "IllegalOperation" ||
       err?.code === 20 ||
-      (typeof err?.message === "string" &&
-        err.message.includes("Transaction numbers are only allowed on a replica set"));
+      err?.code === 59 ||
+      errMsg.includes("Transaction numbers are only allowed on a replica set") ||
+      errMsg.includes("Transactions are not supported by this deployment") ||
+      errMsg.includes("This MongoDB deployment does not support retryable writes") ||
+      errMsg.includes("Please use a replica set") ||
+      errMsg.includes("not support retryable writes") ||
+      errMsg.includes("not supported by this deployment");
 
     if (isStandaloneError) {
-      // ⚠️  Graceful fallback: run without session (no atomicity, but works locally)
+      // ⚠️ Graceful fallback: abort/end previous failed session and run without session
       if (session) {
-        try { await session.abortTransaction(); } catch (_) { /* ignore */ }
+        try {
+          if (session.inTransaction()) {
+            await session.abortTransaction();
+          }
+        } catch (_) { /* ignore */ }
+        try {
+          await session.endSession();
+        } catch (_) { /* ignore */ }
+        session = undefined;
       }
       console.warn(
         "[withTransaction] Standalone MongoDB detected — running without ACID session. " +
@@ -47,12 +59,18 @@ export async function withTransaction<T>(
 
     // For any other error, abort and re-throw
     if (session) {
-      try { await session.abortTransaction(); } catch (_) { /* ignore */ }
+      try {
+        if (session.inTransaction()) {
+          await session.abortTransaction();
+        }
+      } catch (_) { /* ignore */ }
     }
     throw err;
   } finally {
     if (session) {
-      session.endSession();
+      try {
+        await session.endSession();
+      } catch (_) { /* ignore */ }
     }
   }
 }

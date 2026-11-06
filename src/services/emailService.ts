@@ -1,7 +1,6 @@
 import Order from "../models/orderModel";
 import User from "../models/userModel";
-import ReturnRequest from "../models/returnRequestModel";
-import ReturnReplacementRequest from "../models/ReturnReplacementRequest";
+import ClaimRequest from "../models/ClaimRequest";
 import NurseryProfile from "../models/nurseryProfileModel";
 import sendEmail, { getEmailConfig, EmailResult } from "../utils/sendEmail";
 // Import productRegistry to guarantee all catalog schemas (Plant, Pot, Accessory, etc.)
@@ -536,18 +535,22 @@ export const sendAdminStockCollisionAlert = async (details: {
  */
 export const sendReturnRequestCreatedEmails = async (returnRequestId: string): Promise<void> => {
   try {
-    const returnReq = await ReturnRequest.findById(returnRequestId)
-      .populate("user", "name email")
-      .populate("nursery", "name businessName email")
-      .populate("order", "orderStatus totalPrice")
+    const returnReq = await ClaimRequest.findById(returnRequestId)
+      .populate("userId", "name email")
+      .populate("nurseryId", "name businessName email")
+      .populate("orderId", "orderStatus totalPrice")
       .lean();
 
     if (!returnReq) return;
 
-    const customer = returnReq.user as any;
-    const nursery = returnReq.nursery as any;
-    const orderId = returnReq.order?._id?.toString() || (returnReq.order as any)?.toString() || "N/A";
-    const proofUrl = returnReq.proofImages?.[0] || "#";
+    const customer = (returnReq.userId || (returnReq as any).user) as any;
+    const nursery = (returnReq.nurseryId || (returnReq as any).nursery) as any;
+    const orderId =
+      returnReq.orderId?._id?.toString() ||
+      (returnReq.orderId as any)?.toString() ||
+      (returnReq as any).order?._id?.toString() ||
+      "N/A";
+    const proofUrl = returnReq.proofImages?.[0] || returnReq.images?.[0] || "#";
 
     // 1. Customer Confirmation Email
     if (customer?.email) {
@@ -624,15 +627,19 @@ export const sendReturnRequestCreatedEmails = async (returnRequestId: string): P
  */
 export const sendReturnRequestStatusUpdateEmail = async (returnRequestId: string): Promise<void> => {
   try {
-    const returnReq = await ReturnRequest.findById(returnRequestId)
-      .populate("user", "name email")
+    const returnReq = await ClaimRequest.findById(returnRequestId)
+      .populate("userId", "name email")
       .lean();
 
-    if (!returnReq || !returnReq.user) return;
-    const customer = returnReq.user as any;
-    if (!customer.email) return;
+    if (!returnReq) return;
+    const customer = (returnReq.userId || (returnReq as any).user) as any;
+    if (!customer?.email) return;
 
-    const orderId = returnReq.order?.toString() || "N/A";
+    const orderId =
+      returnReq.orderId?._id?.toString() ||
+      (returnReq.orderId as any)?.toString() ||
+      (returnReq as any).order?.toString() ||
+      "N/A";
     const html = getReturnRequestCustomerHtml(
       customer.name || "Customer",
       orderId,
@@ -666,7 +673,7 @@ export const sendReturnReplacementStatusEmails = async (
   returnRequestId: string
 ): Promise<void> => {
   try {
-    const returnReq = await ReturnReplacementRequest.findById(returnRequestId)
+    const returnReq = await ClaimRequest.findById(returnRequestId)
       .populate("userId", "name email phone")
       .populate("orderId", "orderStatus deliveredAt createdAt shippingInfo totalPrice")
       .populate("nurseryId", "name email");

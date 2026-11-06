@@ -14,6 +14,7 @@ import {
   getActiveCommissionMap,
   calculateNurseryFinancialSummary,
   calculateGlobalFinancialSummary,
+  resolveNurseryIdentity,
 } from "../utils/financialUtils";
 import cacheManager from "../utils/cacheManager";
 
@@ -323,7 +324,7 @@ const getMultiPeriodAggregationPipeline = (
 
 const getPeriodStats = async (
   tf: string,
-  nurseryId?: Types.ObjectId
+  nurseryId?: Types.ObjectId | Types.ObjectId[]
 ): Promise<IPeriodMetrics> => {
   const range = getExtendedDateRangeFilter(tf);
   const commExpr = await getDynamicCommissionExpression();
@@ -334,7 +335,7 @@ const getPeriodStats = async (
     "orderItems.status": { $in: ["Delivered", "Claimed"] },
   };
   if (nurseryId) {
-    matchFilter["orderItems.nursery"] = nurseryId;
+    matchFilter["orderItems.nursery"] = Array.isArray(nurseryId) ? { $in: nurseryId } : nurseryId;
   }
   const result = await Order.aggregate(getMultiPeriodAggregationPipeline(matchFilter, commExpr));
   return roundPeriodMetrics((result[0] as IPeriodMetrics) || emptyPeriodMetrics());
@@ -408,7 +409,9 @@ export const getNurseryDashboardStats = catchAsyncErrors(
       return;
     }
 
-    const nurseryId = new Types.ObjectId(userId.toString());
+    const { profileId, allIds } = await resolveNurseryIdentity(userId);
+    const nurseryId = profileId;
+    const nurseryIds = allIds;
     const { timeframe = "this_month", startDate, endDate } = req.query;
     const dateRange = getExtendedDateRangeFilter(
       timeframe as string,
@@ -425,11 +428,11 @@ export const getNurseryDashboardStats = catchAsyncErrors(
     const currentYear = new Date().getFullYear().toString();
     const lastYear = (new Date().getFullYear() - 1).toString();
     const nurseryMatch = {
-      "orderItems.nursery": nurseryId,
+      "orderItems.nursery": { $in: nurseryIds },
       createdAt: dateRange,
     };
     const nurseryFinancialMatch = {
-      "orderItems.nursery": nurseryId,
+      "orderItems.nursery": { $in: nurseryIds },
       createdAt: dateRange,
       // 🛡️ SECURITY: Only SETTLED items (Delivered/Claimed) contribute to earnings.
 
@@ -471,15 +474,15 @@ export const getNurseryDashboardStats = catchAsyncErrors(
       trendsRaw,
       itemsSoldAgg,
     ] = await Promise.all([
-      getPeriodStats("today", nurseryId),
-      getPeriodStats("yesterday", nurseryId),
-      getPeriodStats("this_week", nurseryId),
-      getPeriodStats("last_week", nurseryId),
-      getPeriodStats("this_month", nurseryId),
-      getPeriodStats("last_month", nurseryId),
-      getPeriodStats("this_year", nurseryId),
-      getPeriodStats("last_year", nurseryId),
-      getPeriodStats("lifetime", nurseryId),
+      getPeriodStats("today", nurseryIds),
+      getPeriodStats("yesterday", nurseryIds),
+      getPeriodStats("this_week", nurseryIds),
+      getPeriodStats("last_week", nurseryIds),
+      getPeriodStats("this_month", nurseryIds),
+      getPeriodStats("last_month", nurseryIds),
+      getPeriodStats("this_year", nurseryIds),
+      getPeriodStats("last_year", nurseryIds),
+      getPeriodStats("lifetime", nurseryIds),
 
       Order.aggregate(getMultiPeriodAggregationPipeline(nurseryFinancialMatch, commExpr)),
 
@@ -522,49 +525,49 @@ export const getNurseryDashboardStats = catchAsyncErrors(
         },
       ]),
 
-      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "plants" })),
-      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "pots" })),
-      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "accessories" })),
-      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "gardening-tools" })),
-      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "plant-care" })),
-      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "seeds-bulbs" })),
-      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "stands-shelves" })),
-      Product.aggregate(stockCountPipeline({ nursery: nurseryId, category: "artificial-dried" })),
+      Product.aggregate(stockCountPipeline({ nursery: { $in: nurseryIds }, category: "plants" })),
+      Product.aggregate(stockCountPipeline({ nursery: { $in: nurseryIds }, category: "pots" })),
+      Product.aggregate(stockCountPipeline({ nursery: { $in: nurseryIds }, category: "accessories" })),
+      Product.aggregate(stockCountPipeline({ nursery: { $in: nurseryIds }, category: "gardening-tools" })),
+      Product.aggregate(stockCountPipeline({ nursery: { $in: nurseryIds }, category: "plant-care" })),
+      Product.aggregate(stockCountPipeline({ nursery: { $in: nurseryIds }, category: "seeds-bulbs" })),
+      Product.aggregate(stockCountPipeline({ nursery: { $in: nurseryIds }, category: { $in: ["plant-stands-shelves", "stands-shelves"] } })),
+      Product.aggregate(stockCountPipeline({ nursery: { $in: nurseryIds }, category: "artificial-dried" })),
 
-      Product.find({ nursery: nurseryId, category: "plants", stock: { $lt: 10 } })
+      Product.find({ nursery: { $in: nurseryIds }, category: "plants", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Product.find({ nursery: nurseryId, category: "pots", stock: { $lt: 10 } })
+      Product.find({ nursery: { $in: nurseryIds }, category: "pots", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Product.find({ nursery: nurseryId, category: "accessories", stock: { $lt: 10 } })
+      Product.find({ nursery: { $in: nurseryIds }, category: "accessories", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Product.find({ nursery: nurseryId, category: "gardening-tools", stock: { $lt: 10 } })
+      Product.find({ nursery: { $in: nurseryIds }, category: "gardening-tools", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Product.find({ nursery: nurseryId, category: "plant-care", stock: { $lt: 10 } })
+      Product.find({ nursery: { $in: nurseryIds }, category: "plant-care", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Product.find({ nursery: nurseryId, category: "seeds-bulbs", stock: { $lt: 10 } })
+      Product.find({ nursery: { $in: nurseryIds }, category: "seeds-bulbs", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Product.find({ nursery: nurseryId, category: "stands-shelves", stock: { $lt: 10 } })
+      Product.find({ nursery: { $in: nurseryIds }, category: { $in: ["plant-stands-shelves", "stands-shelves"] }, stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
-      Product.find({ nursery: nurseryId, category: "artificial-dried", stock: { $lt: 10 } })
+      Product.find({ nursery: { $in: nurseryIds }, category: "artificial-dried", stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),
 
-      Order.find({ "orderItems.nursery": nurseryId })
+      Order.find({ "orderItems.nursery": { $in: nurseryIds } })
         .populate<{ user: { name: string; email: string } | null }>("user", "name email")
         .sort({ createdAt: -1 })
         .limit(10)
@@ -1102,7 +1105,7 @@ export const getAdminDashboardStats = catchAsyncErrors(
       Product.aggregate(stockCountPipeline({ category: "gardening-tools" })),
       Product.aggregate(stockCountPipeline({ category: "plant-care" })),
       Product.aggregate(stockCountPipeline({ category: "seeds-bulbs" })),
-      Product.aggregate(stockCountPipeline({ category: "stands-shelves" })),
+      Product.aggregate(stockCountPipeline({ category: { $in: ["plant-stands-shelves", "stands-shelves"] } })),
       Product.aggregate(stockCountPipeline({ category: "artificial-dried" })),
 
       Product.find({ category: "plants", stock: { $lt: 10 } }).select("name stock price").limit(5).lean(),
@@ -1123,7 +1126,7 @@ export const getAdminDashboardStats = catchAsyncErrors(
         .select("name stock price")
         .limit(5)
         .lean(),
-      Product.find({ category: "stands-shelves", stock: { $lt: 10 } })
+      Product.find({ category: { $in: ["plant-stands-shelves", "stands-shelves"] }, stock: { $lt: 10 } })
         .select("name stock price")
         .limit(5)
         .lean(),

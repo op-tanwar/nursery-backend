@@ -14,6 +14,7 @@
 import { Types, ClientSession } from "mongoose";
 import Order from "../models/orderModel";
 import Payout from "../models/payoutModel";
+import { resolveNurseryIdentity, ResolvedNurseryIdentity } from "./nurseryUtils";
 import {
   getActiveCommissionMap,
   getDynamicCommissionRates,
@@ -229,7 +230,7 @@ export const buildNurseryFinancialMatch = (
   dateRange?: unknown
 ): Record<string, unknown> => {
   const filter: Record<string, unknown> = {
-    "orderItems.nursery": nurseryId,
+    "orderItems.nursery": Array.isArray(nurseryId) ? { $in: nurseryId } : nurseryId,
     orderStatus: { $ne: "Cancelled" },
     "orderItems.status": { $in: ["Delivered", "Claimed"] },
   };
@@ -265,13 +266,16 @@ const runAggregate = (model: any, pipeline: any[], session?: ClientSession) => {
  * 🎯 SINGLE SOURCE OF TRUTH FOR NURSERY BALANCE & METRICS
  * Used by Nursery Dashboard, Nursery Payouts API, Admin Payouts API, and Ledger verification.
  * Fully consumes dynamic configuration from /admin/product-commission.
+ *
+ * @param nurseryIdOrUserId Either NurseryProfile._id OR User._id (automatically resolved via resolveNurseryIdentity)
+ * @param session Optional Mongoose ClientSession for active transactions
  */
 export const calculateNurseryFinancialSummary = async (
-  nurseryId: Types.ObjectId | string,
+  nurseryIdOrUserId: Types.ObjectId | string,
   session?: ClientSession
 ): Promise<INurseryFinancialSummary> => {
   try {
-    const nid = typeof nurseryId === "string" ? new Types.ObjectId(nurseryId) : nurseryId;
+    const { profileId, userId, allIds } = await resolveNurseryIdentity(nurseryIdOrUserId);
     const commExpr = await getDynamicCommissionExpression();
 
     const [orderMetrics, payoutCompleted, payoutPending] = await Promise.all([
@@ -281,7 +285,7 @@ export const calculateNurseryFinancialSummary = async (
           { $unwind: "$orderItems" },
           {
             $match: {
-              "orderItems.nursery": nid,
+              "orderItems.nursery": { $in: allIds },
               orderStatus: { $ne: "Cancelled" },
               // Settled items contribute to real available earnings
               "orderItems.status": { $in: ["Delivered", "Claimed"] },
@@ -337,7 +341,7 @@ export const calculateNurseryFinancialSummary = async (
       runAggregate(
         Payout,
         [
-          { $match: { nursery: nid, status: "COMPLETED" } },
+          { $match: { nursery: { $in: allIds }, status: "COMPLETED" } },
           { $group: { _id: null, total: { $sum: "$requestedAmount" } } },
         ],
         session
@@ -346,7 +350,7 @@ export const calculateNurseryFinancialSummary = async (
       runAggregate(
         Payout,
         [
-          { $match: { nursery: nid, status: { $in: ["PENDING", "PROCESSING"] } } },
+          { $match: { nursery: { $in: allIds }, status: { $in: ["PENDING", "PROCESSING"] } } },
           { $group: { _id: null, total: { $sum: "$requestedAmount" } } },
         ],
         session
@@ -511,4 +515,7 @@ export {
   getEffectiveCommission,
   getEffectiveCommissionRate,
   DEFAULT_CATEGORY_COMMISSIONS,
+  resolveProductCommissionType,
 } from "./commissionService";
+
+export { resolveNurseryIdentity, ResolvedNurseryIdentity } from "./nurseryUtils";
