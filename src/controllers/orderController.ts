@@ -154,10 +154,19 @@ export const getSingleOrder = catchAsyncErrors(
       );
     }
 
-    // 3. Fetch Order by ID with populated relational schemas
+    // 3. Fetch Order by ID with populated relational schemas (null-safe population)
     const order = await Order.findById(id)
       .populate("user", "name email phone role avatar")
-      .populate("orderItems.item")
+      .populate({
+        path: "orderItems.item",
+        select: "name images price discountPrice slug category stock coverImage itemModel",
+        strictPopulate: false,
+      })
+      .populate({
+        path: "orderItems.product",
+        select: "name images price discountPrice slug category stock coverImage itemModel",
+        strictPopulate: false,
+      })
       .populate({
         path: "orderItems.nursery",
         select: "name businessName logo phone email avatar",
@@ -198,9 +207,9 @@ export const getSingleOrder = catchAsyncErrors(
       Array.isArray(order.orderItems) &&
       order.orderItems.some((item: any) => {
         const itemNurseryId =
-          typeof item.nursery === "object" && item.nursery !== null
+          item?.nursery && typeof item.nursery === "object"
             ? item.nursery._id?.toString()
-            : item.nursery?.toString();
+            : item?.nursery?.toString();
         return (
           itemNurseryId === currentUserId ||
           (userNurseryProfileId && itemNurseryId === userNurseryProfileId) ||
@@ -222,9 +231,9 @@ export const getSingleOrder = catchAsyncErrors(
       new Set(
         (orderObj.orderItems || [])
           .map((item: any) =>
-            typeof item.nursery === "object" && item.nursery !== null
+            item?.nursery && typeof item.nursery === "object"
               ? item.nursery._id?.toString()
-              : item.nursery?.toString()
+              : item?.nursery?.toString()
           )
           .filter(Boolean)
       )
@@ -247,28 +256,30 @@ export const getSingleOrder = catchAsyncErrors(
     });
 
     orderObj.orderItems = (orderObj.orderItems || []).map((oi: any) => {
-      const nId =
-        typeof oi.nursery === "object" && oi.nursery !== null
-          ? oi.nursery._id?.toString()
-          : oi.nursery?.toString();
-      const nProfile = profileMap.get(nId);
-      const productDoc = oi.item || oi.product || {};
+      const isNurseryObj = oi?.nursery && typeof oi.nursery === "object";
+      const nId = isNurseryObj
+        ? oi.nursery._id?.toString()
+        : oi?.nursery?.toString();
+      const nProfile = nId ? profileMap.get(nId) : undefined;
+      const productDoc = oi?.item || oi?.product || {};
 
       return {
         ...oi,
         item: productDoc,
         product: productDoc,
         nursery: {
-          ...(typeof oi.nursery === "object" ? oi.nursery : { _id: oi.nursery }),
+          ...(isNurseryObj ? oi.nursery : (oi?.nursery ? { _id: oi.nursery } : {})),
           name:
             nProfile?.businessName ||
-            (typeof oi.nursery === "object" ? oi.nursery?.name : "Verified Nursery"),
+            (isNurseryObj ? oi.nursery?.name : "Verified Nursery") ||
+            "Verified Nursery",
           businessName:
             nProfile?.businessName ||
-            (typeof oi.nursery === "object"
+            (isNurseryObj
               ? oi.nursery?.businessName || oi.nursery?.name
-              : "Verified Nursery"),
-          slug: nProfile?.slug || nProfile?._id?.toString() || nId,
+              : "Verified Nursery") ||
+            "Verified Nursery",
+          slug: nProfile?.slug || nProfile?._id?.toString() || nId || "",
           avatar: nProfile?.avatar?.url,
           logo: nProfile?.coverImage?.url,
         },
@@ -281,9 +292,9 @@ export const getSingleOrder = catchAsyncErrors(
     if (isAssociatedNursery && !isAdmin && !isOwner) {
       orderObj.orderItems = (orderObj.orderItems || []).filter((item: any) => {
         const itemNurseryId =
-          typeof item.nursery === "object" && item.nursery !== null
+          item?.nursery && typeof item.nursery === "object"
             ? item.nursery._id?.toString()
-            : item.nursery?.toString();
+            : item?.nursery?.toString();
         return (
           itemNurseryId === currentUserId ||
           (userNurseryProfileId && itemNurseryId === userNurseryProfileId) ||
