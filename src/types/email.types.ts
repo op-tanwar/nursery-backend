@@ -19,4 +19,8 @@ export interface EmailResult {
   success: boolean;
   messageId?: string;
   error?: string;
+  code?: string;
+  response?: string;
+  responseCode?: number;
+  command?: string;
 }

@@ -131,7 +131,13 @@ export const sendPasswordResetEmail = async (
     });
   } catch (error: any) {
     console.error("[EMAIL ERROR] Type: PASSWORD_RESET | Error:", error?.message || error);
-    return { success: false, error: error?.message || "Failed to dispatch password reset email" };
+    return {
+      success: false,
+      error: error?.message || "Failed to dispatch password reset email",
+      code: error?.code,
+      response: error?.response,
+      command: error?.command,
+    };
   }
 };
 

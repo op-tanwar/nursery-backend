@@ -285,15 +285,41 @@ export const forgotPassword = catchAsyncErrors(
     console.log(`🔑 [ForgotPassword] Generated reset URL for ${user.email}: ${resetPasswordUrl} (Valid 15 min)`);
 
     // Dispatch email — sendForgotPasswordEmail returns EmailResult (never throws)
-    const result = await sendForgotPasswordEmail(user.email, user.name, resetPasswordUrl);
+    try {
+      const result = await sendForgotPasswordEmail(user.email, user.name, resetPasswordUrl);
 
-    if (!result.success) {
-      // Email delivery failed: clear the token so user isn't stuck with a phantom token
+      if (!result.success) {
+        // Email delivery failed: clear the token so user isn't stuck with a phantom token
+        user.resetPasswordToken = undefined;
+        user.resetPasswordExpire = undefined;
+        await user.save({ validateBeforeSave: false });
+
+        console.error("❌ Full Nodemailer Error in forgotPassword:", {
+          message: result.error,
+          code: result.code,
+          response: result.response,
+          command: result.command,
+        });
+
+        return next(
+          new ErrorHandler(
+            "Email delivery failed. Please check your email address or try again later.",
+            500
+          )
+        );
+      }
+    } catch (err: any) {
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
       await user.save({ validateBeforeSave: false });
 
-      console.error(`❌ [Email Trigger Failed] Event: ForgotPassword, Recipient: ${user.email}, Error: ${result.error}`);
+      console.error("❌ Full Nodemailer Error in forgotPassword:", {
+        message: err.message,
+        code: err.code,
+        response: err.response,
+        command: err.command,
+      });
+
       return next(
         new ErrorHandler(
           "Email delivery failed. Please check your email address or try again later.",

@@ -31,7 +31,7 @@ async function runEmailSmokeTest() {
   console.log("-------------------------------------------------------");
 
   // Step 1: Verify Connection
-  console.log("\n[Step 1/3] Verifying SMTP Transporter Connection...");
+  console.log("\n[Step 1/4] Verifying SMTP Transporter Connection...");
   const isConnected = await verifyEmailConnection();
   if (!isConnected) {
     console.error("❌ SMTP Verification failed. Aborting dispatch test.");
@@ -39,7 +39,7 @@ async function runEmailSmokeTest() {
   }
 
   // Step 2: Verify Centralized Service Helpers
-  console.log("\n[Step 2/3] Verifying Email Service Helper Functions...");
+  console.log("\n[Step 2/4] Verifying Email Service Helper Functions...");
   const helpers = [
     "sendWelcomeEmail",
     "sendPasswordResetEmail",
@@ -70,7 +70,7 @@ async function runEmailSmokeTest() {
     process.exit(1);
   }
 
-  console.log(`\n[Step 3/3] Sending Diagnostic Test Email to: ${targetEmail}...`);
+  console.log(`\n[Step 3/4] Sending Diagnostic Test Email to: ${targetEmail}...`);
   const timestamp = new Date().toISOString();
   const testSubject = `🧪 [SMTP Test] Urban Nursery Pipeline Check (${timestamp})`;
   const testHtml = `
@@ -111,18 +111,39 @@ async function runEmailSmokeTest() {
     type: "DIAGNOSTIC_TEST",
   });
 
-  if (result.success) {
+  if (!result.success) {
+    console.error("\n=======================================================");
+    console.error("❌ FAILURE: Test email dispatch failed.");
+    console.error(`   Error: ${result.error}`);
+    console.error("=======================================================\n");
+    process.exit(1);
+  }
+
+  console.log(`✅ Diagnostic email delivered! Message ID: ${result.messageId}`);
+
+  // Step 4: Verify Forgot Password Email Flow Specifically
+  console.log(`\n[Step 4/4] Verifying sendForgotPasswordEmail to: ${targetEmail}...`);
+  const mockResetUrl = `https://urbannursery-neon.vercel.app/password/reset/mock-token-${Date.now()}`;
+  const resetResult = await emailService.sendForgotPasswordEmail(targetEmail, "Test User", mockResetUrl);
+
+  if (resetResult.success) {
     console.log("\n=======================================================");
-    console.log("🎉 SUCCESS: Test email delivered!");
-    console.log(`   Message ID: ${result.messageId}`);
-    console.log(`   Recipient:  ${targetEmail}`);
-    console.log(`   Envelope:   from=${config.fromEmail}, to=${targetEmail}`);
+    console.log("🎉 SUCCESS: All tests passed!");
+    console.log(`   Diagnostic Message ID: ${result.messageId}`);
+    console.log(`   Reset Password ID:     ${resetResult.messageId}`);
+    console.log(`   Recipient:             ${targetEmail}`);
+    console.log(`   Envelope:              from=${config.fromEmail}, to=${targetEmail}`);
     console.log("=======================================================\n");
     process.exit(0);
   } else {
     console.error("\n=======================================================");
-    console.error("❌ FAILURE: Test email dispatch failed.");
-    console.error(`   Error: ${result.error}`);
+    console.error("❌ FAILURE: Forgot password email dispatch failed.");
+    console.error("❌ Full Nodemailer Error in forgotPassword:", {
+      message: resetResult.error,
+      code: resetResult.code,
+      response: resetResult.response,
+      command: resetResult.command,
+    });
     console.error("=======================================================\n");
     process.exit(1);
   }

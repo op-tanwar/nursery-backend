@@ -21,19 +21,20 @@ export const getEmailConfig = () => {
     process.env.EMAIL_HOST ||
     process.env.MAIL_HOST ||
     "smtp.gmail.com"
-  ).trim();
+  ).trim().replace(/^["']|["']$/g, "");
 
+  // Strip any accidental whitespace or wrapping quotes from credentials
   const user = (
     process.env.SMTP_USER ||
+    process.env.SMTP_MAIL ||
     process.env.EMAIL_USER ||
     process.env.GMAIL_USER ||
     process.env.MAIL_USER ||
     process.env.MAIL_USERNAME ||
     process.env.EMAIL ||
     ""
-  ).trim();
+  ).trim().replace(/^["']|["']$/g, "");
 
-  // Strip spaces, accidental surrounding quotes, and line breaks from App Passwords
   const pass = (
     process.env.SMTP_PASS ||
     process.env.SMTP_PASSWORD ||
@@ -43,7 +44,7 @@ export const getEmailConfig = () => {
     process.env.GMAIL_APP_PASSWORD ||
     process.env.MAIL_PASSWORD ||
     ""
-  ).replace(/[\s"'\r\n]/g, "");
+  ).trim().replace(/^["']|["']$/g, "").replace(/\s+/g, "");
 
   const isGmail =
     service === "gmail" ||
@@ -78,25 +79,28 @@ export const getEmailConfig = () => {
       : port === 465;
 
   const fromEmail = (
+    process.env.SMTP_FROM_EMAIL ||
     process.env.FROM_EMAIL ||
     process.env.EMAIL_FROM ||
     process.env.SMTP_FROM ||
     user ||
     "support@urbannursery.com"
-  ).trim();
+  ).trim().replace(/^["']|["']$/g, "");
 
   const fromName = (
+    process.env.SMTP_FROM_NAME ||
     process.env.EMAIL_FROM_NAME ||
     process.env.APP_NAME ||
     "Urban Nursery"
-  ).trim();
+  ).trim().replace(/^["']|["']$/g, "");
 
   const adminEmail = (
     process.env.ADMIN_NOTIFICATION_EMAIL ||
+    process.env.ADMIN_ALERT_EMAIL ||
     process.env.ADMIN_EMAIL ||
     user ||
     "admin@urbannursery.com"
-  ).trim();
+  ).trim().replace(/^["']|["']$/g, "");
 
   return {
     service,
@@ -115,53 +119,30 @@ export const getEmailConfig = () => {
 };
 
 /**
- * Builds resilient transport options for a given configuration
+ * Builds resilient transport options for a given configuration and port.
+ * Pooling is strictly disabled (pool: false) on serverless/cloud containers so stale connections are never reused.
  */
 const buildTransportOptions = (
   config: ReturnType<typeof getEmailConfig>,
-  overridePort?: number,
-  overrideSecure?: boolean,
-  forceService?: string
+  targetPort: number = config.port
 ) => {
-  const targetPort = overridePort !== undefined ? overridePort : config.port;
-  const targetSecure =
-    overrideSecure !== undefined ? overrideSecure : (targetPort === 465 || config.secure);
-
-  // In cloud environments (Render containers), avoid persistent connection pooling
-  // because idle container spin-downs sever the pooled TCP socket, causing ECONNRESET/ETIMEDOUT.
-  const usePool = !config.isCloudPlatform && process.env.NODE_ENV !== "production";
-
-  // Use Nodemailer's built-in 'service: gmail' if requested or if Gmail SSL is targeted
-  if (forceService === "gmail" || (config.isGmail && targetPort === 465)) {
-    return {
-      service: "gmail",
-      auth: {
-        user: config.user,
-        pass: config.pass,
-      },
-      tls: {
-        rejectUnauthorized: false,
-      },
-      pool: usePool,
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-    };
-  }
+  const is587 = targetPort === 587;
+  const is465 = targetPort === 465;
 
   return {
-    host: config.host,
+    host: config.host || "smtp.gmail.com",
     port: targetPort,
-    secure: targetSecure,
+    secure: is465, // Port 465 = Direct SSL, Port 587 = STARTTLS
+    requireTLS: is587, // Enforce STARTTLS handshake on port 587
     auth: {
       user: config.user,
       pass: config.pass,
     },
     tls: {
       rejectUnauthorized: false,
+      minVersion: "TLSv1.2",
     },
-    pool: usePool,
-    maxConnections: usePool ? 3 : 1,
+    pool: false, // Pooling strictly disabled on serverless/cloud containers
     connectionTimeout: 10000,
     greetingTimeout: 10000,
     socketTimeout: 15000,
@@ -260,29 +241,27 @@ export const verifyEmailConnection = async (): Promise<boolean> => {
       return false;
     }
 
-    // Probe 2: Automatic Fallback (e.g. if Port 587 is blocked by Render firewall, test Port 465 SSL)
+    // Probe 2: Automatic Fallback: If port 465 fails, immediately fall back to port 587 (secure: false, requireTLS: true); or vice versa
+    const fallbackPort = config.port === 465 ? 587 : 465;
     try {
-      console.log("   ↳ Probing fallback transport (Port 465 Direct SSL / service: gmail)...");
-      const fallbackOptions = config.isGmail
-        ? buildTransportOptions(config, 465, true, "gmail")
-        : buildTransportOptions(config, config.port === 465 ? 587 : 465, config.port !== 465);
-
+      console.log(`   ↳ Probing fallback transport (Port ${fallbackPort} ${fallbackPort === 587 ? "STARTTLS" : "Direct SSL"})...`);
+      const fallbackOptions = buildTransportOptions(config, fallbackPort);
       const fallbackTransporter = nodemailer.createTransport(fallbackOptions as any);
       await fallbackTransporter.verify();
 
-      console.log("✅ SMTP Server is ready to send messages (via Fallback Transport)");
+      console.log(`✅ SMTP Server is ready to send messages (via Fallback Port ${fallbackPort})`);
       console.log("=======================================================\n");
       transporter = fallbackTransporter;
       return true;
     } catch (fallbackError: any) {
       console.error(
-        "❌ CRITICAL: SMTP Transport verification failed on both primary and fallback transports:",
+        `❌ CRITICAL: SMTP Transport verification failed on both primary (Port ${config.port}) and fallback (Port ${fallbackPort}):`,
         fallbackError.message || fallbackError
       );
       console.error(
-        `   ↳ Fallback Code: ${fallbackError?.code || "N/A"} | ResponseCode: ${fallbackError?.responseCode || "N/A"} | Command: ${fallbackError?.command || "N/A"}`
+        `   ↳ Fallback Code: ${fallbackError?.code || "N/A"} | Response: ${fallbackError?.response || "N/A"} | Command: ${fallbackError?.command || "N/A"}`
       );
-      console.warn("   ↳ Action required on Render: Set SMTP_PORT=465, SMTP_SECURE=true, and verify SMTP_USER & SMTP_PASSWORD.");
+      console.warn("   ↳ Action required on Render: Verify SMTP_USER & SMTP_PASSWORD.");
       console.log("=======================================================\n");
       resetTransporter();
       return false;
@@ -300,11 +279,11 @@ const isValidEmail = (email: string): boolean => {
  *
  * Execution Model:
  * 1. Checks email validity and configuration.
- * 2. Stage 1: Dispatches through primary transporter.
- * 3. Stage 2 (Auto-Recovery): If connection times out or fails with network errors
- *    (common on Render when port 587 is blocked), immediately retries via fallback
- *    Port 465 Direct SSL / 'service: gmail' within the same request.
- * 4. Never crashes the calling thread. Returns { success: boolean, messageId?: string, error?: string }.
+ * 2. Stage 1: Dispatches through primary transporter (Port 465 or configured port).
+ * 3. Stage 2 (Auto-Recovery): If connection times out or fails with socket hang up / network errors
+ *    (common on Render when port 465 or 587 is blocked/hung), immediately falls back to alternate
+ *    Port 587 (STARTTLS with requireTLS: true) or Port 465 (Direct SSL) within the same request.
+ * 4. Never crashes the calling thread. Returns EmailResult with diagnostic details.
  */
 export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => {
   const config = getEmailConfig();
@@ -313,19 +292,19 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
   if (!options.email || !isValidEmail(options.email)) {
     const err = `Invalid or missing recipient email: "${options.email}"`;
     console.error(`[EMAIL ERROR] Type: ${emailType} | Recipient: ${options.email || "undefined"} | Error: ${err}`);
-    return { success: false, error: err };
+    return { success: false, error: err, code: "EINVALIDEMAIL" };
   }
 
   if (!options.subject) {
     const err = "Email subject is required";
     console.error(`[EMAIL ERROR] Type: ${emailType} | Recipient: ${options.email} | Error: ${err}`);
-    return { success: false, error: err };
+    return { success: false, error: err, code: "ENOSUBJECT" };
   }
 
   if (!config.isConfigured) {
     const warn = `Email not sent to ${options.email} because SMTP credentials are not configured in Render environment variables. Set SMTP_USER & SMTP_PASSWORD. (Subject: "${options.subject}")`;
     console.warn(`[EMAIL ERROR] Type: ${emailType} | Recipient: ${options.email} | Error: ${warn}`);
-    return { success: false, error: warn };
+    return { success: false, error: warn, code: "ECONFIG" };
   }
 
   const fromAddress = `"${config.fromName}" <${config.fromEmail}>`;
@@ -357,27 +336,31 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
       const authErr = "SMTP Authentication Failed (535). Please verify your SMTP_USER and 16-character Google App Password in Render Dashboard.";
       console.error(`[EMAIL ERROR] Type: ${emailType} | Recipient: ${options.email} | Error: ${authErr}`);
       console.error(`   ↳ Code: ${primaryCode} | ResponseCode: ${primaryError?.responseCode} | Command: ${primaryError?.command || "N/A"}`);
-      return { success: false, error: authErr };
+      return {
+        success: false,
+        error: authErr,
+        code: primaryCode,
+        response: primaryError?.response,
+        responseCode: primaryError?.responseCode,
+        command: primaryError?.command,
+      };
     }
 
+    const fallbackPort = config.port === 465 ? 587 : 465;
     console.warn(
-      `⚠️ [Nodemailer] Primary send attempt failed for ${options.email} (Port: ${config.port}, Code: ${primaryCode || "N/A"}: ${primaryMsg}). Initiating Stage 2 Auto-Recovery Fallback...`
+      `⚠️ [Nodemailer] Primary send attempt failed for ${options.email} (Port: ${config.port}, Code: ${primaryCode || "N/A"}: ${primaryMsg}). Immediately falling back to Port ${fallbackPort} (${fallbackPort === 587 ? "STARTTLS" : "Direct SSL"})...`
     );
 
-    // ── STAGE 2: Auto-Recovery Fallback (Bypasses Render Port 587 Block) ──
+    // ── STAGE 2: Auto-Recovery Fallback (Dual-Port Fallback: 465 <-> 587) ──
     try {
       resetTransporter();
 
-      // If primary was on 587 or custom port, switch to Port 465 SSL / 'service: gmail'
-      const fallbackOptions = config.isGmail
-        ? buildTransportOptions(config, 465, true, "gmail")
-        : buildTransportOptions(config, config.port === 465 ? 587 : 465, config.port !== 465);
-
+      const fallbackOptions = buildTransportOptions(config, fallbackPort);
       const fallbackTransporter = nodemailer.createTransport(fallbackOptions as any);
       const info = await fallbackTransporter.sendMail(mailOptions);
 
       console.log(
-        `[EMAIL SUCCESS] Type: ${emailType} | Recipient: ${options.email} | Subject: "${options.subject}" | ID: ${info.messageId} (Delivered via Fallback Transport)`
+        `[EMAIL SUCCESS] Type: ${emailType} | Recipient: ${options.email} | Subject: "${options.subject}" | ID: ${info.messageId} (Delivered via Fallback Port ${fallbackPort})`
       );
 
       // Cache the successful fallback transporter
@@ -387,15 +370,22 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
       const fallbackMsg = fallbackError?.response || fallbackError?.message || primaryMsg;
       console.error(`[EMAIL ERROR] Type: ${emailType} | Recipient: ${options.email} | Error: ${fallbackMsg}`);
       console.error(
-        `   ↳ Primary Failure:   ${primaryMsg} (Code: ${primaryCode || "N/A"}, ResponseCode: ${primaryError?.responseCode || "N/A"}, Command: ${primaryError?.command || "N/A"})`
+        `   ↳ Primary Failure (Port ${config.port}):   ${primaryMsg} (Code: ${primaryCode || "N/A"}, Response: ${primaryError?.response || "N/A"}, Command: ${primaryError?.command || "N/A"})`
       );
       console.error(
-        `   ↳ Fallback Failure:  ${fallbackError?.message} (Code: ${fallbackError?.code || "N/A"}, ResponseCode: ${fallbackError?.responseCode || "N/A"}, Command: ${fallbackError?.command || "N/A"})`
+        `   ↳ Fallback Failure (Port ${fallbackPort}):  ${fallbackError?.message} (Code: ${fallbackError?.code || "N/A"}, Response: ${fallbackError?.response || "N/A"}, Command: ${fallbackError?.command || "N/A"})`
       );
       console.error(`   ↳ Diagnostic Info:   Target Host=${config.host}:${config.port}, User=${config.user ? config.user.replace(/(.{3}).*(@.*)/, "$1***$2") : "EMPTY"}, Cloud=${config.isCloudPlatform}`);
       
       resetTransporter();
-      return { success: false, error: fallbackMsg };
+      return {
+        success: false,
+        error: fallbackMsg,
+        code: fallbackError?.code || primaryCode,
+        response: fallbackError?.response || primaryError?.response,
+        responseCode: fallbackError?.responseCode || primaryError?.responseCode,
+        command: fallbackError?.command || primaryError?.command,
+      };
     }
   }
 };
