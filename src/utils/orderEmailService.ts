@@ -3,24 +3,31 @@
  */
 export {
   sendWelcomeEmail,
+  sendPasswordResetEmail,
   sendForgotPasswordEmail,
   sendPasswordChangedAlert,
   sendOrderConfirmationEmail,
+  sendOrderStatusUpdateEmail,
   sendOrderStatusProgressionEmail,
   sendOrderShippedEmail,
   sendOrderDeliveredEmail,
   sendReviewRequestEmail,
   sendOrderCancellationEmails,
+  sendNurseryNewOrderAlert,
   sendNurseryNewOrderEmail,
   sendNurseryOrderAlertEmail,
   sendLowStockAlert,
+  sendNurseryPayoutNotification,
   sendPayoutStatusEmail,
   sendFallbackRefundEmail,
   sendAdminStockCollisionAlert,
   sendReturnRequestCreatedEmails,
   sendReturnRequestStatusUpdateEmail,
+  sendReturnReplacementStatusEmails,
   sendAdminNewOrderEmail,
   sendAdminHighValueOrderAlert,
+  sendAdminNewVendorAlert,
+  sendAdminCriticalPaymentFailureAlert,
 } from "../services/emailService";
 
 // Backwards-compatible alias for order status updates

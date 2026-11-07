@@ -6,12 +6,16 @@ import BlacklistedToken from "../models/blacklistedTokenModel";
 import sendToken from "../utils/jwtToken";
 import { getClearCookieOptions } from "../utils/cookieHelper";
 import sendEmail, { getEmailConfig } from "../utils/sendEmail";
-import { sendWelcomeEmail } from "../utils/orderEmailService";
+import {
+  sendWelcomeEmail,
+  sendForgotPasswordEmail,
+  sendPasswordResetEmail,
+  sendPasswordChangedAlert,
+  sendAdminNewVendorAlert,
+} from "../utils/orderEmailService";
 import {
   sendContactInquiryEmails,
   getAdminNewUserAlertHtml,
-  sendPasswordChangedAlert,
-  sendForgotPasswordEmail,
   sendEmailChangeOtpEmail,
   sendEmailChangedSuccessNotification,
 } from "../templates/emails";
@@ -69,7 +73,15 @@ export const registerUser = catchAsyncErrors(
       role: "user",
     });
 
-    sendWelcomeEmail(user.name, user.email).catch((e) => console.error(e));
+    sendWelcomeEmail({ email: user.email, name: user.name }).catch((e) =>
+      console.error("❌ [Email Trigger Failed] Event: WelcomeEmail, Error:", e?.message || e)
+    );
+
+    if (user.role === "nursery") {
+      sendAdminNewVendorAlert(user).catch((e) =>
+        console.error("❌ [Email Trigger Failed] Event: AdminNewVendorAlert, Error:", e?.message || e)
+      );
+    }
 
     // Alert Super Admin about new user registration
     const config = getEmailConfig();
@@ -82,7 +94,9 @@ export const registerUser = catchAsyncErrors(
         message: `New customer registered: ${user.name} (${user.email})`,
         html: getAdminNewUserAlertHtml("Customer", user.name, user.email),
         type: "ADMIN_NEW_CUSTOMER_ALERT",
-      }).catch((e) => console.error("Non-fatal admin registration alert error:", e));
+      }).catch((e) =>
+        console.error("❌ [Email Trigger Failed] Event: AdminRegistrationAlert, Error:", e?.message || e)
+      );
     }
 
     sendToken(user, 201, res, req);

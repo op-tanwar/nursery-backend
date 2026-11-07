@@ -199,6 +199,21 @@ export const resetTransporter = (): void => {
 };
 
 /**
+ * Helper to extract standardized error diagnostics from SMTP / network errors
+ */
+export const formatEmailError = (
+  error: any
+): { message: string; code?: string; responseCode?: number; command?: string; stack?: string } => {
+  return {
+    message: error?.message || String(error),
+    code: error?.code,
+    responseCode: error?.responseCode,
+    command: error?.command,
+    stack: error?.stack,
+  };
+};
+
+/**
  * Connection verification executed on server startup with auto-fallback probe
  */
 export const verifyEmailConnection = async (): Promise<boolean> => {
@@ -216,7 +231,7 @@ export const verifyEmailConnection = async (): Promise<boolean> => {
 
   if (!config.isConfigured) {
     console.warn("⚠️ [Nodemailer] WARNING: SMTP credentials missing in environment variables.");
-    console.warn("   Required in Render Dashboard: EMAIL_USER (or SMTP_USER) and EMAIL_PASSWORD (or SMTP_PASS).");
+    console.warn("   Required in Render Dashboard: SMTP_USER (or EMAIL_USER) and SMTP_PASS (or EMAIL_PASSWORD).");
     console.warn("   Emails will fail safely without crashing HTTP requests.");
     console.log("=======================================================\n");
     return false;
@@ -226,15 +241,20 @@ export const verifyEmailConnection = async (): Promise<boolean> => {
   try {
     const t = getTransporter();
     await t.verify();
-    console.log("✅ [Nodemailer] Primary SMTP Connection verified! Ready to deliver emails.");
+    console.log("✅ SMTP Server is ready to send messages");
     console.log("=======================================================\n");
     return true;
   } catch (error: any) {
-    console.warn(`⚠️ [Nodemailer] Primary SMTP verification failed on port ${config.port}:`, error.message || error);
+    console.error("❌ CRITICAL: SMTP Transport verification failed:", error?.message || error);
+    console.error(
+      `   ↳ Code: ${error?.code || "N/A"} | ResponseCode: ${error?.responseCode || "N/A"} | Command: ${error?.command || "N/A"}`
+    );
 
     // If authentication error, no need to retry with different ports
     if (error.code === "EAUTH" || error.responseCode === 535) {
-      console.error("   ↳ Reason: Invalid username or password. Ensure you are using a 16-character Google App Password (not your account password).");
+      console.error(
+        "   ↳ Reason: Invalid username or password. Ensure you are using a 16-character Google App Password (not your account password)."
+      );
       console.log("=======================================================\n");
       resetTransporter();
       return false;
@@ -250,13 +270,19 @@ export const verifyEmailConnection = async (): Promise<boolean> => {
       const fallbackTransporter = nodemailer.createTransport(fallbackOptions as any);
       await fallbackTransporter.verify();
 
-      console.log("✅ [Nodemailer] Fallback SMTP Connection verified successfully! Adopting fallback transport.");
+      console.log("✅ SMTP Server is ready to send messages (via Fallback Transport)");
       console.log("=======================================================\n");
       transporter = fallbackTransporter;
       return true;
     } catch (fallbackError: any) {
-      console.error("❌ [Nodemailer] Both primary and fallback SMTP connections failed:", fallbackError.message || fallbackError);
-      console.warn("   ↳ Action required on Render: Set EMAIL_PORT=465, EMAIL_SECURE=true, and verify EMAIL_USER & EMAIL_PASSWORD.");
+      console.error(
+        "❌ CRITICAL: SMTP Transport verification failed on both primary and fallback transports:",
+        fallbackError.message || fallbackError
+      );
+      console.error(
+        `   ↳ Fallback Code: ${fallbackError?.code || "N/A"} | ResponseCode: ${fallbackError?.responseCode || "N/A"} | Command: ${fallbackError?.command || "N/A"}`
+      );
+      console.warn("   ↳ Action required on Render: Set SMTP_PORT=465, SMTP_SECURE=true, and verify SMTP_USER & SMTP_PASSWORD.");
       console.log("=======================================================\n");
       resetTransporter();
       return false;
@@ -297,7 +323,7 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
   }
 
   if (!config.isConfigured) {
-    const warn = `Email not sent to ${options.email} because SMTP credentials are not configured in Render environment variables. Set EMAIL_USER & EMAIL_PASSWORD. (Subject: "${options.subject}")`;
+    const warn = `Email not sent to ${options.email} because SMTP credentials are not configured in Render environment variables. Set SMTP_USER & SMTP_PASSWORD. (Subject: "${options.subject}")`;
     console.warn(`[EMAIL ERROR] Type: ${emailType} | Recipient: ${options.email} | Error: ${warn}`);
     return { success: false, error: warn };
   }
@@ -328,8 +354,9 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
     // Fast-fail if authentication is rejected (EAUTH / 535) — wrong password cannot be fixed by retrying ports
     if (primaryCode === "EAUTH" || primaryError?.responseCode === 535) {
       resetTransporter();
-      const authErr = "SMTP Authentication Failed (535). Please verify your EMAIL_USER and 16-character Google App Password in Render Dashboard.";
+      const authErr = "SMTP Authentication Failed (535). Please verify your SMTP_USER and 16-character Google App Password in Render Dashboard.";
       console.error(`[EMAIL ERROR] Type: ${emailType} | Recipient: ${options.email} | Error: ${authErr}`);
+      console.error(`   ↳ Code: ${primaryCode} | ResponseCode: ${primaryError?.responseCode} | Command: ${primaryError?.command || "N/A"}`);
       return { success: false, error: authErr };
     }
 
@@ -359,8 +386,12 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
     } catch (fallbackError: any) {
       const fallbackMsg = fallbackError?.response || fallbackError?.message || primaryMsg;
       console.error(`[EMAIL ERROR] Type: ${emailType} | Recipient: ${options.email} | Error: ${fallbackMsg}`);
-      console.error(`   ↳ Primary Failure:   ${primaryMsg} (Code: ${primaryCode || "N/A"})`);
-      console.error(`   ↳ Fallback Failure:  ${fallbackError?.message} (Code: ${fallbackError?.code || "N/A"})`);
+      console.error(
+        `   ↳ Primary Failure:   ${primaryMsg} (Code: ${primaryCode || "N/A"}, ResponseCode: ${primaryError?.responseCode || "N/A"}, Command: ${primaryError?.command || "N/A"})`
+      );
+      console.error(
+        `   ↳ Fallback Failure:  ${fallbackError?.message} (Code: ${fallbackError?.code || "N/A"}, ResponseCode: ${fallbackError?.responseCode || "N/A"}, Command: ${fallbackError?.command || "N/A"})`
+      );
       console.error(`   ↳ Diagnostic Info:   Target Host=${config.host}:${config.port}, User=${config.user ? config.user.replace(/(.{3}).*(@.*)/, "$1***$2") : "EMPTY"}, Cloud=${config.isCloudPlatform}`);
       
       resetTransporter();

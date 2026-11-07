@@ -21,6 +21,7 @@ import {
   sendOrderConfirmationEmail,
   sendNurseryOrderAlertEmail,
   sendAdminNewOrderEmail,
+  sendAdminCriticalPaymentFailureAlert,
 } from "../utils/orderEmailService";
 import sendEmail from "../utils/sendEmail";
 import { getPaymentFailedHtml, sendLowStockAlert } from "../templates/emails";
@@ -559,7 +560,18 @@ export const razorpayWebhook = async (req: AuthenticatedRequest, res: Response) 
           message: `Hi ${customerName}, your payment could not be processed. Please retry checkout.`,
           html: getPaymentFailedHtml(customerName, orderId || "PENDING", retryUrl),
         }).catch((err) =>
-          console.error("❌ [Email Trigger Failed] Event: PaymentFailed, Error:", err?.message)
+          console.error("❌ [Email Trigger Failed] Event: PaymentFailed, Error:", err?.message || err)
+        );
+
+        sendAdminCriticalPaymentFailureAlert({
+          orderId: orderId || "PENDING",
+          paymentId: paymentEntity.id,
+          amount: (paymentEntity.amount || 0) / 100,
+          customerEmail: paymentEntity.email,
+          customerName,
+          reason: paymentEntity.error_description || "Payment failed via gateway webhook",
+        }).catch((err) =>
+          console.error("❌ [Email Trigger Failed] Event: AdminPaymentFailureAlert, Error:", err?.message || err)
         );
       }
 
