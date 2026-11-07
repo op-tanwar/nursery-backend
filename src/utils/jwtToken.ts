@@ -41,8 +41,12 @@ const sendToken = (user: IUser, statusCode: number, res: Response, req?: Request
     .status(statusCode)
     .cookie("token", token, tokenCookieOptions)
     .cookie("role", user.role, roleCookieOptions)
+    .cookie("planto_token", token, tokenCookieOptions)
+    .cookie("planto_role", user.role, roleCookieOptions)
     .json({
       success: true,
+      token,
+      role: user.role,
       user: userData,
     });
 };

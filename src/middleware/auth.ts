@@ -25,21 +25,11 @@ interface DecodedTokenPayload {
 // ------------------------------
 export const isAuthenticatedUser = catchAsyncErrors(
   async (req: Request, res: Response, next: NextFunction) => {
-    let token = req.cookies?.token;
+    let token = req.cookies?.token || req.cookies?.planto_token;
 
-    // Strict Cookie Authentication: browser origins MUST use httpOnly cookies
-    if (!token) {
-      const isBrowserRequest = Boolean(
-        req.headers.origin ||
-        req.headers.referer ||
-        req.headers["sec-fetch-dest"] ||
-        req.headers["sec-fetch-mode"]
-      );
-
-      // Authorization header is permitted exclusively for external non-browser service calls / webhooks
-      if (!isBrowserRequest && req.headers.authorization) {
-        token = req.headers.authorization.split(" ")[1];
-      }
+    // Dual Support: accept cookie or Authorization Bearer header
+    if (!token && req.headers.authorization?.startsWith("Bearer ")) {
+      token = req.headers.authorization.split(" ")[1];
     }
 
     if (!token) {
