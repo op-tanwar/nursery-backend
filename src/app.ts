@@ -4,6 +4,7 @@ import fileUpload from "express-fileupload";
 import cors from "cors";
 import compression from "compression";
 import mainRouter from "./routes";
+import healthRoutes from "./routes/healthRoutes";
 import errorMiddleware from "./middleware/error";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
@@ -244,29 +245,8 @@ app.get("/", (_req, res) => {
   res.status(200).json({ success: true, message: "Urban Nursery API is active" });
 });
 
-// Detailed system readiness & database health check
-app.get("/health", (req, res) => {
-  const dbStatus = mongoose.connection.readyState;
-  const isDbHealthy = dbStatus === 1; // 1 means connected
-
-  if (!isDbHealthy) {
-    return res.status(503).json({
-      success: false,
-      status: "DOWN",
-      database: "DISCONNECTED",
-      timestamp: new Date(),
-      uptime: process.uptime(),
-    });
-  }
-
-  return res.status(200).json({
-    success: true,
-    status: "UP",
-    database: "CONNECTED",
-    timestamp: new Date(),
-    uptime: process.uptime()
-  });
-});
+// Detailed system readiness, database health check & live email diagnostics
+app.use("/health", healthRoutes);
 
 // ======================================================================
 // 🛣️ 8. APPLICATION BASE ROUTES (/api/v1 and backwards-compatible /api)

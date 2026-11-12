@@ -18,8 +18,12 @@ import taxRoutes from "./taxRoute";
 import commissionRoutes from "./commissionRoute";
 import claimRoutes from "./claimRoutes";
 import reviewRoutes, { adminReviewRouter } from "./reviewRoute";
+import healthRoutes from "./healthRoutes";
 
 const mainRouter = express.Router();
+
+// 🏥 Health & Diagnostics routes
+mainRouter.use("/health", healthRoutes);
 
 // 🔐 Authentication system routes (Social OAuth + Credentials)
 mainRouter.use("/auth", authRoutes);
