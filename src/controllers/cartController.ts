@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import mongoose from "mongoose";
 import catchAsyncErrors from "../middleware/catchAsyncErrors";
 import ErrorHandler from "../utils/errorHandler";
 import Cart from "../models/cartModel";
@@ -29,6 +30,9 @@ export const ACTIVE_NURSERIES_CACHE_KEY = "nurseries:active_ids_list";
  * across product references and user accounts.
  */
 export const getActiveNurseryIds = async (): Promise<string[]> => {
+  if (mongoose.connection.readyState !== 1) {
+    return [];
+  }
   return cacheManager.getOrSet(
     ACTIVE_NURSERIES_CACHE_KEY,
     async () => {

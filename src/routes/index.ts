@@ -1,5 +1,6 @@
 import express from "express";
 import productRoutes from "./productRoute";
+import { getAllProducts, getFeaturedProducts } from "../controllers/productController";
 import userRoutes from "./userRoutes";
 import orderRouter from "./ordersRoute";
 import nurseryProfileRoutes from "./nurseryProfileRoute";
@@ -35,6 +36,24 @@ mainRouter.use("/auth", authRoutes);
 // 🛍️ Unified Polymorphic Product Catalog routes
 mainRouter.use("/products", productRoutes);
 mainRouter.use("/product", productRoutes);
+
+// 🌿 Backward-compatibility aliases for legacy category catalog & featured sections
+mainRouter.get("/plants/allPlants", (req, res, next) => {
+  req.query.category = "plants";
+  return getFeaturedProducts(req, res, next);
+});
+mainRouter.get("/pots/allPots", (req, res, next) => {
+  req.query.category = "pots";
+  return getFeaturedProducts(req, res, next);
+});
+mainRouter.get("/plants", (req, res, next) => {
+  req.query.category = "plants";
+  return getAllProducts(req, res, next);
+});
+mainRouter.get("/pots", (req, res, next) => {
+  req.query.category = "pots";
+  return getAllProducts(req, res, next);
+});
 
 // 👤 Customer & identity system routes (Auth/Profile)
 mainRouter.use("/users", userRoutes);

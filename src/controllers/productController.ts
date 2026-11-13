@@ -587,6 +587,213 @@ export const getAllProducts = catchAsyncErrors(
 );
 
 /**
+ * 🌟 GET FEATURED / BEST-SELLING PRODUCTS (GLOBAL OR HYPERLOCAL PINCODE)
+ * GET /api/v1/products/featured
+ * Query params: ?category=plants|pots, ?pincode=452001, ?limit=8
+ */
+export const getFeaturedProducts = catchAsyncErrors(
+  async (req: Request, res: Response, _next: NextFunction) => {
+    const requestedLimit = Number(req.query.limit);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(Math.floor(requestedLimit), 48)
+        : 8;
+
+    const { category, pincode, pinCode, postalCode } = req.query;
+    const rawCustomerPin = (pincode || pinCode || postalCode) as string | undefined;
+
+    // 1. Base active & in-stock filter
+    const baseFilter: any = {
+      isPublished: { $ne: false },
+      isActive: { $ne: false },
+      stock: { $gt: 0 },
+    };
+
+    // Filter out inactive nurseries for non-admins
+    if (mongoose.connection.readyState === 1 && req.user?.role !== "admin") {
+      try {
+        const activeNurseryIds = await getActiveNurseryIds();
+        if (activeNurseryIds && activeNurseryIds.length > 0) {
+          baseFilter.nursery = { $in: activeNurseryIds };
+        }
+      } catch (err: any) {
+        console.warn("⚠️ [getFeaturedProducts] Failed to retrieve active nurseries:", err?.message || err);
+      }
+    }
+
+    // 2. Category Normalization & Matching
+    const normCategory = normalizeCategory(category);
+    if (normCategory) {
+      if (normCategory === "plant-stands-shelves" || normCategory === "stands-shelves") {
+        baseFilter.category = { $in: ["plant-stands-shelves", "stands-shelves"] };
+      } else if (normCategory === "pots") {
+        baseFilter.category = { $in: ["pots", "pots-planters"] };
+      } else {
+        baseFilter.category = normCategory;
+      }
+    }
+
+    // 3. Resolve Delivery Pincode & Serviceability
+    let cleanCustomerPin: string | null = null;
+    if (rawCustomerPin) {
+      try {
+        cleanCustomerPin = normalizeIndianPincode(String(rawCustomerPin));
+      } catch {
+        cleanCustomerPin = null;
+      }
+    }
+
+    // Graceful offline/disconnected fallback
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        category: normCategory || "all",
+        pincode: cleanCustomerPin,
+        isHyperlocal: Boolean(cleanCustomerPin),
+        products: [],
+        plants: normCategory === "plants" ? [] : undefined,
+        pots: normCategory === "pots" ? [] : undefined,
+      });
+    }
+
+    const isNationalCourierCategory =
+      normCategory &&
+      [
+        "pots",
+        "pots-planters",
+        "accessories",
+        "gardening-tools",
+        "plant-care",
+        "seeds-bulbs",
+        "stands-shelves",
+        "plant-stands-shelves",
+        "artificial-dried",
+      ].includes(normCategory);
+
+    let serviceableProducts: any[] = [];
+    const localSalesMap = new Map<string, number>();
+
+    // 4. Branch: Pincode Provided vs Global
+    if (cleanCustomerPin) {
+      // A. Query local order aggregation for products sold within this pincode
+      try {
+        const localSalesAgg = await Order.aggregate([
+          {
+            $match: {
+              "shippingInfo.pinCode": String(cleanCustomerPin),
+              orderStatus: { $ne: "Cancelled" },
+            },
+          },
+          { $unwind: "$orderItems" },
+          {
+            $group: {
+              _id: "$orderItems.item",
+              localSold: { $sum: "$orderItems.quantity" },
+            },
+          },
+          { $sort: { localSold: -1 } },
+          { $limit: limit * 4 },
+        ]);
+
+        for (const record of localSalesAgg) {
+          if (record._id) {
+            localSalesMap.set(String(record._id), record.localSold);
+          }
+        }
+      } catch (err: any) {
+        console.warn("⚠️ [getFeaturedProducts] Local sales aggregation fallback:", err?.message || err);
+      }
+
+      // B. Apply geographic serviceability filter
+      const pinFilter = { ...baseFilter };
+
+      if (!isNationalCourierCategory) {
+        // Perishable plants require hyperlocal serviceable nursery radius or national courier
+        const serviceableNurseryIds = await getServiceableNurseriesForCatalog(cleanCustomerPin);
+
+        if (serviceableNurseryIds && serviceableNurseryIds.size > 0) {
+          const geoOrCondition = [
+            { shippingType: "NATIONAL_COURIER" },
+            { nursery: { $in: Array.from(serviceableNurseryIds) } },
+          ];
+          pinFilter.$or = geoOrCondition;
+        } else {
+          // No local nurseries serviceable for this pincode; show courier-deliverable products only
+          pinFilter.shippingType = "NATIONAL_COURIER";
+        }
+      }
+
+      // Query candidate active products in that category matching serviceability
+      const candidates = await Product.find(pinFilter)
+        .populate("nursery", "businessName slug businessAddress.city logo")
+        .select("-__v")
+        .lean();
+
+      // Weighted ranking:
+      // 1. Local sales in this pincode
+      // 2. Global sales count (sold / soldCount)
+      // 3. Ratings (ratingsAverage / ratings)
+      // 4. Newest (createdAt)
+      candidates.sort((a: any, b: any) => {
+        const aLocal = localSalesMap.get(String(a._id)) || 0;
+        const bLocal = localSalesMap.get(String(b._id)) || 0;
+        if (bLocal !== aLocal) return bLocal - aLocal;
+
+        const aSold = a.sold ?? a.soldCount ?? 0;
+        const bSold = b.sold ?? b.soldCount ?? 0;
+        if (bSold !== aSold) return bSold - aSold;
+
+        const aRating = a.ratingsAverage ?? a.ratings ?? 0;
+        const bRating = b.ratingsAverage ?? b.ratings ?? 0;
+        if (bRating !== aRating) return bRating - aRating;
+
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+
+      serviceableProducts = candidates.slice(0, limit);
+
+      // Safe Fallback: If fewer than limit items found for this pincode and it was a national category,
+      // pad with top global best-sellers if applicable to keep UI full
+      if (serviceableProducts.length < limit && isNationalCourierCategory) {
+        const existingIds = new Set(serviceableProducts.map((p) => String(p._id)));
+        const fallbackItems = await Product.find({
+          ...baseFilter,
+          _id: { $nin: Array.from(existingIds) },
+        })
+          .sort({ sold: -1, ratingsAverage: -1, ratings: -1, createdAt: -1 })
+          .limit(limit - serviceableProducts.length)
+          .populate("nursery", "businessName slug businessAddress.city logo")
+          .select("-__v")
+          .lean();
+
+        serviceableProducts.push(...fallbackItems);
+      }
+    } else {
+      // 5. Global Best-Sellers (No Pincode provided)
+      serviceableProducts = await Product.find(baseFilter)
+        .sort({ sold: -1, ratingsAverage: -1, ratings: -1, createdAt: -1 })
+        .limit(limit)
+        .populate("nursery", "businessName slug businessAddress.city logo")
+        .select("-__v")
+        .lean();
+    }
+
+    // Attach response payload with polymorphic and category-specific keys
+    return res.status(200).json({
+      success: true,
+      count: serviceableProducts.length,
+      category: normCategory || "all",
+      pincode: cleanCustomerPin,
+      isHyperlocal: Boolean(cleanCustomerPin),
+      products: serviceableProducts,
+      plants: normCategory === "plants" ? serviceableProducts : undefined,
+      pots: normCategory === "pots" ? serviceableProducts : undefined,
+    });
+  }
+);
+
+/**
  * 📦 GET PRODUCT BY ID OR SLUG (SINGLE QUERY RESOLVER WITH 301 REDIRECT SUPPORT)
  * GET /api/v1/products/:idOrSlug
  */

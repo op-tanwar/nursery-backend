@@ -152,6 +152,9 @@ export interface IProduct extends Document {
   stock: number;
   reservedStock: number;
   availableStock: number;
+  sold: number;
+  soldCount: number;
+  isFeatured?: boolean;
   coverImage?: IProductImage;
   images: IProductImage[];
   description: string;
@@ -297,6 +300,22 @@ const productSchema = new Schema<IProduct>(
       default: true,
       index: true,
     },
+    sold: {
+      type: Number,
+      default: 0,
+      min: [0, "Sold count cannot be negative"],
+      index: true,
+    },
+    soldCount: {
+      type: Number,
+      default: 0,
+      min: [0, "Sold count cannot be negative"],
+    },
+    isFeatured: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     ratingsAverage: {
       type: Number,
       default: 0,
@@ -405,6 +424,10 @@ productSchema.index({ nursery: 1, isActive: 1 });
 
 // High-ratings sorting:
 productSchema.index({ isPublished: 1, ratingsAverage: -1 });
+
+// High-sales & best-sellers sorting:
+productSchema.index({ category: 1, isPublished: 1, sold: -1 });
+productSchema.index({ isPublished: 1, sold: -1, ratingsAverage: -1 });
 
 // Direct B-tree index on product name for fast prefix & sorting:
 productSchema.index({ name: 1 });

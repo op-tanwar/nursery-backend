@@ -432,6 +432,22 @@ export const createOrderRecord = async (
     );
   }
 
+  // 📈 Atomically increment product sales volume (sold / soldCount)
+  for (const item of orderData.orderItems) {
+    if (item.item) {
+      await Product.findByIdAndUpdate(
+        item.item,
+        {
+          $inc: {
+            sold: Number(item.quantity) || 1,
+            soldCount: Number(item.quantity) || 1,
+          },
+        },
+        updateOpts
+      );
+    }
+  }
+
   // 📒 Ledger accounting entries for multi-vendor commissions
   const ledgerEntries = orderData.orderItems.map((item) => ({
     nursery: item.nursery,
