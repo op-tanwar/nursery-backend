@@ -170,8 +170,8 @@ async function runTaxParityTests() {
     { input: "Plant Care", expectedRate: 18, expectedSlug: "plant-care" },
     { input: "SeedsBulbs", expectedRate: 0, expectedSlug: "seeds-bulbs" },
     { input: "Seeds & Bulbs", expectedRate: 0, expectedSlug: "seeds-bulbs" },
-    { input: "PlantStandsShelves", expectedRate: 18, expectedSlug: "stands-shelves" },
-    { input: "Plant Stands", expectedRate: 18, expectedSlug: "stands-shelves" },
+    { input: "PlantStandsShelves", expectedRate: 18, expectedSlug: "plant-stands-shelves" },
+    { input: "Plant Stands", expectedRate: 18, expectedSlug: "plant-stands-shelves" },
     { input: "ArtificialDriedPlant", expectedRate: 18, expectedSlug: "artificial-dried" },
     { input: "Artificial & Dried Plants", expectedRate: 18, expectedSlug: "artificial-dried" },
   ];
