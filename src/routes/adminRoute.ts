@@ -7,6 +7,7 @@ import {
   toggleNurseryStatus,
   getAdminVendorDetails,
   manageNurseryServicePincodes,
+  adminSyncAllProductVisibility,
 } from "../controllers/nurseryProfileController";
 import {
   getAllBulkOrders,
@@ -86,5 +87,9 @@ router
 router
   .route("/vendor/:id")
   .get(isAuthenticatedUser, authorizeRoles("admin"), getAdminVendorDetails);
+
+router
+  .route("/sync-product-visibility")
+  .post(isAuthenticatedUser, authorizeRoles("admin"), adminSyncAllProductVisibility);
 
 export default router;

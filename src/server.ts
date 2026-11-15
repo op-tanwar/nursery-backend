@@ -35,6 +35,7 @@ import {
   initDistributedStockReservation,
   shutdownDistributedStockReservation,
 } from "./services/stockReservationService";
+import { syncAllProductsNurseryActiveStatus } from "./utils/backfillNurseryActive";
 
 // ======================================================================
 // ☁️ 2. THIRD-PARTY SERVICES CONFIGURATION
@@ -60,6 +61,13 @@ const startServer = async () => {
     // 🔌 Initialize Enterprise Redis Client & Distributed Stock Reservation Subsystem
     await initRedis();
     await initDistributedStockReservation();
+
+    // 🔄 Sync Platform-Wide Nursery Product Visibility on Startup
+    try {
+      await syncAllProductsNurseryActiveStatus();
+    } catch (syncError) {
+      console.error("❌ Failed to synchronize nursery product visibility on startup:", syncError);
+    }
 
     try {
       warmPincodeIndex();

@@ -11,17 +11,25 @@ export const AppError = ErrorHandler;
  * @param user User document or plain object containing account lifecycle flags
  * @throws {ErrorHandler} 403 Forbidden if account is blocked, deactivated, or suspended
  */
-export const assertAccountActive = (user: IUser | any): void => {
+export const assertAccountActive = (
+  user: IUser | any,
+  options?: { allowSuspendedNursery?: boolean }
+): void => {
   if (!user) {
     throw new ErrorHandler("User account not found.", 401);
   }
 
-  // 1. Validate boolean blocked flag
+  // 1. Validate boolean blocked flag (permanently blocked accounts are strictly prohibited)
   if (user.isBlocked) {
     throw new ErrorHandler(
       "Your account has been suspended or blocked by an administrator.",
       403
     );
+  }
+
+  // If vendor dashboard access is allowed for nursery vendors to view notices/upload documents
+  if (options?.allowSuspendedNursery && user.role === "nursery") {
+    return;
   }
 
   // 2. Validate boolean active flag (strictly false; undefined defaults to active in Mongoose schema)
@@ -49,9 +57,13 @@ export const assertAccountActive = (user: IUser | any): void => {
  * Validates linked NurseryProfile status (e.g., rejection, deactivation, suspension).
  *
  * @param profile NurseryProfile document or plain object
+ * @param options Configuration options (e.g. allowDashboardAccess)
  * @throws {ErrorHandler} 403 Forbidden if nursery profile is blocked, deactivated, or rejected
  */
-export const assertNurseryProfileActive = (profile: any): void => {
+export const assertNurseryProfileActive = (
+  profile: any,
+  options?: { allowDashboardAccess?: boolean }
+): void => {
   if (!profile) return;
 
   // 1. Validate boolean blocked flag
@@ -60,6 +72,11 @@ export const assertNurseryProfileActive = (profile: any): void => {
       "Your nursery profile has been blocked by an administrator.",
       403
     );
+  }
+
+  // Allow vendor dashboard access so vendors can view suspension banner and upload documents
+  if (options?.allowDashboardAccess) {
+    return;
   }
 
   // 2. Validate boolean active flag

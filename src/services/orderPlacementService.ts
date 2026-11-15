@@ -32,6 +32,7 @@ import { calcLineGross, roundMoney } from "../utils/financialUtils";
 import { getActiveTaxMap } from "../utils/taxService";
 import { getEffectiveCommission } from "../utils/commissionService";
 import { withTransaction } from "../utils/transactionHelper";
+import { isNurseryLiveAndActive } from "../utils/nurseryUtils";
 import {
   sendOrderConfirmationEmail,
   sendNurseryOrderAlertEmail,
@@ -175,18 +176,23 @@ export const calculateAndVerifyOrderTotals = async (
 
     const modelName = resolveProductCommissionType(dbProduct, item.itemModel);
 
-    if (dbProduct.isActive === false) {
+    if (dbProduct.isActive === false || dbProduct.isPublished === false) {
       throw new ErrorHandler(
         `Product "${dbProduct.name}" is no longer active for commerce.`,
         400
       );
     }
 
+    if (dbProduct.isNurseryActive !== true) {
+      throw new ErrorHandler(
+        `Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`,
+        400
+      );
+    }
+
     if (dbProduct.nursery) {
-      const nurseryProfile = await NurseryProfile.findOne({
-        nursery: dbProduct.nursery,
-      }).lean();
-      if (nurseryProfile && !nurseryProfile.isActive) {
+      const isLive = await isNurseryLiveAndActive(dbProduct.nursery);
+      if (!isLive) {
         throw new ErrorHandler(
           `Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`,
           400

@@ -16,87 +16,20 @@ import cacheManager from "../utils/cacheManager";
 import { resolveProductCommissionType } from "../utils/productRegistry";
 
 // ======================================================================
-// ⚡ CENTRALIZED CACHE CONSTANTS & INVALIDATION UTILITIES
+// ⚡ RE-EXPORT CENTRALIZED CACHE CONSTANTS & INVALIDATION UTILITIES
 // ======================================================================
+import {
+  ACTIVE_NURSERIES_CACHE_KEY,
+  getActiveNurseryIds,
+  invalidateNurseryCache,
+  isNurseryLiveAndActive,
+} from "../utils/nurseryUtils";
 
-/**
- * Global cache key for active nursery vendor user IDs (5-minute TTL)
- */
-export const ACTIVE_NURSERIES_CACHE_KEY = "nurseries:active_ids_list";
-
-/**
- * ⚡ Fetch cached active and approved nursery user and profile IDs
- * Returns both NurseryProfile._id and User._id strings for complete consistency
- * across product references and user accounts.
- */
-export const getActiveNurseryIds = async (): Promise<string[]> => {
-  if (mongoose.connection.readyState !== 1) {
-    return [];
-  }
-  return cacheManager.getOrSet(
-    ACTIVE_NURSERIES_CACHE_KEY,
-    async () => {
-      // 1. Fetch active profiles (excluding explicitly rejected or deactivated profiles)
-      const activeNurseries = await NurseryProfile.find({
-        isActive: { $ne: false },
-        approvalStatus: { $ne: "Rejected" },
-      })
-        .select("nursery _id")
-        .lean();
-
-      const ids = new Set<string>();
-      activeNurseries.forEach((n) => {
-        if (n._id) ids.add(n._id.toString());
-        if (n.nursery) ids.add(n.nursery.toString());
-      });
-
-      // 2. Fetch active users with nursery vendor role
-      const activeUsers = await User.find({
-        role: "nursery",
-        isActive: { $ne: false },
-        isBlocked: { $ne: true },
-        status: { $nin: ["Blocked", "Suspended"] },
-      })
-        .select("_id")
-        .lean();
-
-      activeUsers.forEach((u) => {
-        if (u._id) ids.add(u._id.toString());
-      });
-
-      return Array.from(ids);
-    },
-    300 // 5 Minutes TTL
-  );
-};
-
-/**
- * 🧹 Invalidate all active nursery ID caches and nursery-specific profile caches
- * Clears both exact keys and pattern namespaces (nurseries:* and nursery:*)
- */
-export const invalidateNurseryCache = async (nurseryId?: string): Promise<void> => {
-  const keysToDelete = [
-    ACTIVE_NURSERIES_CACHE_KEY,
-    "nurseries:active_ids",
-  ];
-
-  if (nurseryId) {
-    const idStr = nurseryId.toString();
-    keysToDelete.push(
-      `nursery:${idStr}`,
-      `nursery_profile:${idStr}`,
-      `pname:nursery:${idStr}`
-    );
-  }
-
-  await Promise.all(keysToDelete.map((key) => cacheManager.del(key)));
-
-  await Promise.all([
-    cacheManager.invalidatePattern("nurseries:"),
-    nurseryId
-      ? cacheManager.invalidatePattern(`nursery:${nurseryId}:`)
-      : cacheManager.invalidatePattern("nursery:"),
-  ]);
+export {
+  ACTIVE_NURSERIES_CACHE_KEY,
+  getActiveNurseryIds,
+  invalidateNurseryCache,
+  isNurseryLiveAndActive,
 };
 
 // ======================================================================
@@ -167,7 +100,7 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
   }
 
   const isNurseryActive = (nurseryId?: string | null): boolean => {
-    if (!nurseryId) return true; // Direct platform product
+    if (!nurseryId) return false;
     if (!activeNurseryIds.includes(nurseryId)) {
       return false;
     }
@@ -175,7 +108,12 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
     const userId = profile?.nursery ? profile.nursery.toString() : nurseryId;
     const userDoc = userMap.get(userId);
 
-    if (profile && profile.isActive === false) {
+    if (
+      profile &&
+      (profile.isActive === false ||
+        profile.approvalStatus !== "Approved" ||
+        profile.isBlocked === true)
+    ) {
       return false;
     }
 
@@ -206,9 +144,9 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
     const profile = profileMap.get(nurseryId);
     const nurseryName = profile?.businessName || "Urban Nursery";
 
-    if (!product || product.isActive === false || product.isPublished === false) {
+    if (!product || product.isActive === false || product.isPublished === false || product.isNurseryActive !== true) {
       isAvailable = false;
-      unavailableReason = "PRODUCT_DISABLED";
+      unavailableReason = product?.isNurseryActive !== true ? "NURSERY_INACTIVE" : "PRODUCT_DISABLED";
     } else {
       if (!isNurseryActive(nurseryId)) {
         isAvailable = false;

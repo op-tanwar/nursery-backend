@@ -15,6 +15,7 @@ import {
   backfillNurserySlugs,
   getNurseryCommissionRates,
   updateNurseryCommission,
+  adminSyncAllProductVisibility,
 } from "../controllers/nurseryProfileController";
 import { isAuthenticatedUser, authorizeRoles } from "../middleware/auth";
 import { validateNurseryDocumentsMiddleware } from "../middleware/nurseryDocumentUpload";
@@ -92,5 +93,10 @@ router
 router
   .route("/admin/backfill-slugs")
   .post(isAuthenticatedUser, authorizeRoles("admin"), backfillNurserySlugs);
+
+// 🔄 Admin utility: force platform-wide product visibility synchronization
+router
+  .route("/admin/sync-product-visibility")
+  .post(isAuthenticatedUser, authorizeRoles("admin"), adminSyncAllProductVisibility);
 
 export default router;

@@ -62,14 +62,15 @@ export const isAuthenticatedUser = catchAsyncErrors(
     }
 
     // 🛡️ REAL-TIME VALIDATION GUARD:
-    // Ensures accounts blocked or deactivated after token generation are immediately rejected with 403 Forbidden
-    assertAccountActive(user);
+    // Ensures accounts permanently blocked are immediately rejected with 403 Forbidden,
+    // while allowing suspended nursery merchants to authenticate and view their dashboard notices
+    assertAccountActive(user, { allowSuspendedNursery: true });
 
-    // If nursery vendor, verify linked NurseryProfile is also active and not rejected
+    // If nursery vendor, verify linked NurseryProfile
     if (user.role === "nursery") {
       const nurseryProfile = await NurseryProfile.findOne({ nursery: user._id }).lean();
       if (nurseryProfile) {
-        assertNurseryProfileActive(nurseryProfile);
+        assertNurseryProfileActive(nurseryProfile, { allowDashboardAccess: true });
       }
     }
 

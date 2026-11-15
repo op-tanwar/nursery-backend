@@ -26,6 +26,7 @@ import {
 import sendEmail from "../utils/sendEmail";
 import { getPaymentFailedHtml, sendLowStockAlert } from "../templates/emails";
 import Product from "../models/productModel";
+import { isNurseryLiveAndActive } from "../utils/nurseryUtils";
 import {
   getCaseInsensitiveModel,
   resolveProductAndModel,
@@ -125,16 +126,18 @@ export const createRazorpayOrder = catchAsyncErrors(
 
       const modelName = resolveProductCommissionType(dbProduct, rawModelName || item.itemModel);
 
-      if (dbProduct.isActive === false) {
+      if (dbProduct.isActive === false || dbProduct.isPublished === false) {
         return next(new ErrorHandler(`Product "${dbProduct.name}" is currently inactive and cannot be ordered.`, 400));
+      }
+
+      if (dbProduct.isNurseryActive !== true) {
+        return next(new ErrorHandler(`Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`, 400));
       }
 
       // Check vendor status
       if (dbProduct.nursery) {
-        const nurseryProfile = await NurseryProfile.findOne({
-          $or: [{ _id: dbProduct.nursery }, { nursery: dbProduct.nursery }],
-        }).lean();
-        if (nurseryProfile && !nurseryProfile.isActive) {
+        const isLive = await isNurseryLiveAndActive(dbProduct.nursery);
+        if (!isLive) {
           return next(new ErrorHandler(`Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`, 400));
         }
       }

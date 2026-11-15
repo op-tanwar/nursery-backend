@@ -1,6 +1,9 @@
 import mongoose, { Types } from "mongoose";
 import NurseryProfile from "../models/nurseryProfileModel";
+import User from "../models/userModel";
+import Product from "../models/productModel";
 import ErrorHandler from "./errorHandler";
+import cacheManager from "./cacheManager";
 
 export interface ResolvedNurseryIdentity {
   /** The canonical multi-vendor storefront ID (NurseryProfile._id) */
@@ -14,16 +17,12 @@ export interface ResolvedNurseryIdentity {
 }
 
 /**
+ * Global cache key for active nursery vendor user & profile IDs (5-minute TTL)
+ */
+export const ACTIVE_NURSERIES_CACHE_KEY = "nurseries:active_ids_list";
+
+/**
  * 🛡️ SINGLE SOURCE OF TRUTH: Dual Identity Resolver for Nursery Multi-Vendor Domain
- *
- * Problem:
- * - Products and Order line-items store `orderItems.nursery` as `NurseryProfile._id`.
- * - Nursery auth contexts and session tokens provide `req.user._id` (the User model ID).
- * - Because User._id !== NurseryProfile._id, querying orderItems with req.user._id matches 0 records.
- *
- * Solution:
- * This helper dynamically resolves both the canonical `NurseryProfile._id` and linked `User._id`
- * regardless of which one is supplied by the caller, returning `allIds` for safe `$in` aggregations.
  */
 export async function resolveNurseryIdentity(
   inputNurseryOrUserId?: Types.ObjectId | string | null,
@@ -75,3 +74,159 @@ export async function resolveNurseryIdentity(
     profile,
   };
 }
+
+/**
+ * ⚡ Fetch active & approved nursery user and profile IDs
+ * A nursery is strictly active ONLY IF:
+ * 1. Linked User: role === "nursery", isActive === true, isBlocked !== true, status === "Active"
+ * 2. NurseryProfile: approvalStatus === "Approved", isActive === true, isBlocked !== true
+ */
+export const getActiveNurseryIds = async (): Promise<string[]> => {
+  if (mongoose.connection.readyState !== 1) {
+    return [];
+  }
+  return cacheManager.getOrSet(
+    ACTIVE_NURSERIES_CACHE_KEY,
+    async () => {
+      // 1. Fetch active, unblocked, un-suspended users with role "nursery"
+      const activeUsers = await User.find({
+        role: "nursery",
+        isActive: true,
+        isBlocked: { $ne: true },
+        status: { $regex: /^active$/i },
+      })
+        .select("_id")
+        .lean();
+
+      if (!activeUsers || activeUsers.length === 0) {
+        return [];
+      }
+
+      const activeUserIds = activeUsers.map((u) => u._id);
+
+      // 2. Fetch active and approved profiles belonging to these active users
+      const activeProfiles = await NurseryProfile.find({
+        nursery: { $in: activeUserIds },
+        isActive: true,
+        approvalStatus: { $regex: /^approved$/i },
+        isBlocked: { $ne: true },
+      })
+        .select("nursery _id")
+        .lean();
+
+      const ids = new Set<string>();
+      activeProfiles.forEach((p) => {
+        if (p._id) ids.add(p._id.toString());
+        if (p.nursery) ids.add(p.nursery.toString());
+      });
+
+      return Array.from(ids);
+    },
+    300 // 5 Minutes TTL
+  );
+};
+
+/**
+ * 🔒 Directly check if a specific nursery identity (Profile._id, User._id, or slug) is currently live & active
+ */
+export const isNurseryLiveAndActive = async (
+  nurseryIdOrSlug: string | Types.ObjectId
+): Promise<boolean> => {
+  if (!nurseryIdOrSlug) return false;
+  const activeIds = await getActiveNurseryIds();
+  const idStr = nurseryIdOrSlug.toString().trim();
+
+  if (activeIds.includes(idStr)) return true;
+
+  // If slug was passed, check profile
+  if (!mongoose.Types.ObjectId.isValid(idStr)) {
+    const profile = await NurseryProfile.findOne({
+      slug: idStr.toLowerCase().trim(),
+      isActive: true,
+      approvalStatus: { $regex: /^approved$/i },
+      isBlocked: { $ne: true },
+    })
+      .select("_id nursery")
+      .lean();
+
+    if (profile) {
+      if (
+        activeIds.includes(profile._id.toString()) ||
+        (profile.nursery && activeIds.includes(profile.nursery.toString()))
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
+
+/**
+ * 🧹 Invalidate all active nursery ID caches and nursery-specific profile caches
+ */
+export const invalidateNurseryCache = async (nurseryId?: string): Promise<void> => {
+  const keysToDelete = [
+    ACTIVE_NURSERIES_CACHE_KEY,
+    "nurseries:active_ids",
+  ];
+
+  if (nurseryId) {
+    const idStr = nurseryId.toString();
+    keysToDelete.push(
+      `nursery:${idStr}`,
+      `nursery_profile:${idStr}`,
+      `pname:nursery:${idStr}`
+    );
+  }
+
+  // Clear in-memory geospatial cache if available
+  try {
+    const { clearGeoCaches } = await import("./pincodeService");
+    clearGeoCaches();
+  } catch {}
+
+  await Promise.all(keysToDelete.map((key) => cacheManager.del(key)));
+
+  await Promise.all([
+    cacheManager.invalidatePattern("nurseries:"),
+    cacheManager.invalidatePattern("geo:nurseries:"),
+    cacheManager.invalidatePattern("catalog:"),
+    cacheManager.invalidatePattern("products:"),
+    nurseryId
+      ? cacheManager.invalidatePattern(`nursery:${nurseryId}:`)
+      : cacheManager.invalidatePattern("nursery:"),
+  ]);
+};
+
+/**
+ * 🔄 Synchronize product visibility flag (`isNurseryActive`) for a nursery
+ */
+export const syncNurseryProductsActiveStatus = async (
+  nurseryUserIdOrProfileId: string | Types.ObjectId,
+  isActive: boolean
+): Promise<number> => {
+  try {
+    const resolved = await resolveNurseryIdentity(nurseryUserIdOrProfileId);
+    const idStrings = resolved.allIds.map((id) => id.toString());
+    const idObjectIds = resolved.allIds;
+    const allQueryIds = [...idStrings, ...idObjectIds];
+
+    const result = await Product.updateMany(
+      {
+        $or: [
+          { nursery: { $in: allQueryIds } },
+          { nurseryId: { $in: allQueryIds } },
+          { vendor: { $in: allQueryIds } },
+        ],
+      },
+      { $set: { isNurseryActive: isActive } }
+    );
+    await invalidateNurseryCache(resolved.profileId.toString());
+    await invalidateNurseryCache(resolved.userId.toString());
+    return result.modifiedCount;
+  } catch (err: any) {
+    console.error("Failed to sync nursery products active status:", err);
+    return 0;
+  }
+};

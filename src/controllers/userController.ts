@@ -760,6 +760,15 @@ export const updateUserRole = catchAsyncErrors(async (req: Request, res: Respons
     return next(new ErrorHandler(`User entity processing context missing for ID: ${req.params.id}`, 404));
   }
 
+  if (user.role !== "nursery") {
+    try {
+      const { syncNurseryProductsActiveStatus } = await import("../utils/nurseryUtils");
+      await syncNurseryProductsActiveStatus(user._id, false);
+    } catch (e) {
+      console.warn("⚠️ Failed to deactivate nursery products on role change:", e);
+    }
+  }
+
   res.status(200).json({ success: true, message: "User role updated successfully", user });
 });
 
@@ -773,6 +782,15 @@ export const deleteUser = catchAsyncErrors(
 
     if (user.avatar?.public_id && user.avatar.public_id !== "avatars/default_id") {
       await cloudinary.v2.uploader.destroy(user.avatar.public_id);
+    }
+
+    if (user.role === "nursery") {
+      try {
+        const { syncNurseryProductsActiveStatus } = await import("../utils/nurseryUtils");
+        await syncNurseryProductsActiveStatus(user._id, false);
+      } catch (e) {
+        console.warn("⚠️ Failed to deactivate nursery products on user delete:", e);
+      }
     }
 
     await user.deleteOne();

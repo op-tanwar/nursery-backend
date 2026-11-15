@@ -1,7 +1,9 @@
 import { loadData } from "india-pincode";
+import mongoose from "mongoose";
 import { LruCache } from "./lruCache";
 import { getRedisClient, isRedisReady } from "../config/redis";
 import NurseryProfile from "../models/nurseryProfileModel";
+import { getActiveNurseryIds } from "./nurseryUtils";
 
 export interface NearbyPincode {
   pincode: string;
@@ -704,9 +706,22 @@ export const getServiceableNurseriesForCatalog = async (
   // 3. Batch Resolution across active nurseries in a single database query
   let activeNurseries: any[] = [];
   try {
+    const activeNurseryIds = await getActiveNurseryIds();
+    if (!activeNurseryIds || activeNurseryIds.length === 0) {
+      return new Set<string>();
+    }
+    const activeObjectIds = activeNurseryIds
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
     activeNurseries = await NurseryProfile.find({
-      approvalStatus: "Approved",
-      isActive: { $ne: false },
+      $or: [
+        { _id: { $in: activeObjectIds } },
+        { nursery: { $in: activeObjectIds } },
+      ],
+      approvalStatus: { $regex: /^approved$/i },
+      isActive: true,
+      isBlocked: { $ne: true },
     })
       .select("_id nursery businessAddress deliveryPincodes")
       .lean();

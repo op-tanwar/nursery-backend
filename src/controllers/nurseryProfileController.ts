@@ -35,7 +35,13 @@ import {
   clearCommissionCache,
   DEFAULT_CATEGORY_COMMISSIONS,
 } from "../utils/commissionService";
-import { invalidateNurseryCache, ACTIVE_NURSERIES_CACHE_KEY } from "./cartController";
+import {
+  invalidateNurseryCache,
+  ACTIVE_NURSERIES_CACHE_KEY,
+  isNurseryLiveAndActive,
+  syncNurseryProductsActiveStatus,
+} from "../utils/nurseryUtils";
+import { syncAllProductsNurseryActiveStatus } from "../utils/backfillNurseryActive";
 
 
 const resolveDeliveryPincodes = (pinCode: string): string[] => {
@@ -356,6 +362,10 @@ export const reviewNurseryApplication = catchAsyncErrors(
     await profile.save();
     await invalidateNurseryCache(profile.nursery.toString());
 
+    // 🔄 Sync products visibility when nursery application approval status changes
+    const isLive = status === "Approved" && profile.isActive !== false;
+    await syncNurseryProductsActiveStatus(profile.nursery, isLive);
+
     // 📧 Non-blocking: Notify nursery vendor of application decision
     const nurseryUser = await User.findById(profile.nursery).select("name email").lean();
     if (nurseryUser?.email) {
@@ -442,7 +452,10 @@ export const toggleNurseryStatus = catchAsyncErrors(
     }
 
     targetUser.isActive = isActive;
-    await User.findByIdAndUpdate(targetUserId, { $set: { isActive } });
+    targetUser.status = isActive ? "Active" : "Suspended";
+    await User.findByIdAndUpdate(targetUserId, {
+      $set: { isActive, status: isActive ? "Active" : "Suspended" },
+    });
 
     updatedProfile = await NurseryProfile.findOneAndUpdate(
       { nursery: targetUserId },
@@ -456,8 +469,9 @@ export const toggleNurseryStatus = catchAsyncErrors(
       );
     }
 
-    // ⚡ Invalidate active nurseries cache and vendor-specific profile caches immediately
-    await invalidateNurseryCache(targetUserId.toString());
+    // ⚡ Real-time Product synchronization & Cache invalidation
+    const isLive = isActive && updatedProfile.approvalStatus === "Approved";
+    await syncNurseryProductsActiveStatus(String(targetUserId), isLive);
 
     res.status(200).json({
       success: true,
@@ -561,6 +575,12 @@ export const getPublicVendorBySlug = catchAsyncErrors(
       return next(new ErrorHandler(`Vendor/Nursery not found for: ${slug}`, 404));
     }
 
+    // 🛡️ Ensure nursery is active & approved for public storefront visibility
+    const isLive = await isNurseryLiveAndActive(profile._id);
+    if (!isLive && req.user?.role !== "admin") {
+      return next(new ErrorHandler("This nursery is currently unavailable.", 404));
+    }
+
     const nurseryUserId = profile.nursery?._id || profile.nursery;
     const profileId = profile._id;
 
@@ -578,23 +598,16 @@ export const getPublicVendorBySlug = catchAsyncErrors(
       String(profileId),
     ];
 
-    // Ensure listed products lookup uses { nurseryId: vendor._id, status: 'Active' } without throwing if empty
-    const catalogFilter = {
+    // Strict positive whitelist matching: isPublished, isActive, and isNurseryActive
+    const catalogFilter: any = {
       $or: [
         { nursery: { $in: vendorQueryIds } },
         { nurseryId: { $in: vendorQueryIds } },
         { vendor: { $in: vendorQueryIds } },
       ],
-      $and: [
-        {
-          $or: [
-            { status: "Active" },
-            { status: { $regex: /^active$/i } },
-            { isActive: true },
-            { isActive: { $ne: false } },
-          ],
-        },
-      ],
+      isPublished: true,
+      isActive: true,
+      isNurseryActive: true,
     };
 
     // Fetch catalog products safely from unified Product collection
@@ -782,6 +795,12 @@ export const getVendorProducts = catchAsyncErrors(
       return next(new ErrorHandler(`Vendor/Nursery not found for: ${slug}`, 404));
     }
 
+    // 🛡️ Ensure nursery is active & approved for public product listings
+    const isLive = await isNurseryLiveAndActive(profile._id);
+    if (!isLive && req.user?.role !== "admin") {
+      return next(new ErrorHandler("This nursery is currently unavailable.", 404));
+    }
+
     const nurseryUserId = profile.nursery?._id || profile.nursery;
     const profileId = profile._id;
 
@@ -794,14 +813,16 @@ export const getVendorProducts = catchAsyncErrors(
       String(profileId),
     ];
 
-    // Use $ne: false so products without isActive field (undefined) are still included
-    const catalogFilter = {
+    // Strict positive whitelist matching: isPublished, isActive, and isNurseryActive
+    const catalogFilter: any = {
       $or: [
         { nursery: { $in: vendorQueryIds } },
         { nurseryId: { $in: vendorQueryIds } },
         { vendor: { $in: vendorQueryIds } },
       ],
-      isActive: { $ne: false },
+      isPublished: true,
+      isActive: true,
+      isNurseryActive: true,
     };
 
     const products = await Product.find(catalogFilter).select("-reviews").lean().catch(() => []);
@@ -1273,6 +1294,10 @@ export const verifyNurseryDocuments = catchAsyncErrors(
     await profile.save();
     await invalidateNurseryCache(profile.nursery.toString());
 
+    // 🔄 Sync products visibility when verification/approval status changes
+    const isLive = profile.approvalStatus === "Approved" && profile.isActive !== false;
+    await syncNurseryProductsActiveStatus(profile.nursery, isLive);
+
     // 📧 Non-blocking: Notify nursery vendor of verification & approval decision
     if (profile.verificationStatus === "Approved" || profile.verificationStatus === "Rejected") {
       User.findById(profile.nursery)
@@ -1598,6 +1623,20 @@ export const updateNurseryCommission = catchAsyncErrors(
       message: `Commission settings updated successfully for "${profile.businessName}".`,
       nursery: profile,
       categories: categoryBreakdown,
+    });
+  }
+);
+
+// ======================================================================
+// 🛡️ ADMIN: FORCE PLATFORM-WIDE PRODUCT VISIBILITY SYNCHRONIZATION
+// ======================================================================
+export const adminSyncAllProductVisibility = catchAsyncErrors(
+  async (req: Request, res: Response, next: NextFunction) => {
+    const result = await syncAllProductsNurseryActiveStatus();
+    res.status(200).json({
+      success: result.success,
+      message: "Platform-wide product nursery active status synchronization completed.",
+      data: result,
     });
   }
 );

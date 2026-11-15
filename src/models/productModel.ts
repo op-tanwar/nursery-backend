@@ -170,6 +170,7 @@ export interface IProduct extends Document {
   };
   isPublished: boolean;
   isActive: boolean; // Backward-compatibility alias for isPublished
+  isNurseryActive: boolean; // Governed by Admin nursery approval & active status
   ratingsAverage: number;
   ratingsQuantity: number;
   ratings: number; // Backward-compatibility alias
@@ -306,6 +307,11 @@ const productSchema = new Schema<IProduct>(
       default: true,
       index: true,
     },
+    isNurseryActive: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
     sold: {
       type: Number,
       default: 0,
@@ -425,8 +431,11 @@ productSchema.index({ category: 1, isPublished: 1, price: 1 });
 productSchema.index({ category: 1, isPublished: 1, createdAt: -1 });
 
 // Nursery vendor storefront filtering:
+productSchema.index({ nursery: 1, isPublished: 1, isNurseryActive: 1, createdAt: -1 });
 productSchema.index({ nursery: 1, isPublished: 1, createdAt: -1 });
 productSchema.index({ nursery: 1, isActive: 1 });
+productSchema.index({ isPublished: 1, isNurseryActive: 1 });
+productSchema.index({ category: 1, isPublished: 1, isNurseryActive: 1 });
 
 // High-ratings sorting:
 productSchema.index({ isPublished: 1, ratingsAverage: -1 });
