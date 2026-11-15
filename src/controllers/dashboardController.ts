@@ -7,13 +7,22 @@ import User from "../models/userModel";
 import Payout from "../models/payoutModel";
 import { getCaseInsensitiveModel } from "../utils/productRegistry";
 import {
-  roundMoney as roundMoney_,
+  roundMoney,
+  toPaise,
+  toRupees,
+  calcLineGross,
+  calcLineCommission,
+  calcLineNet,
   getNextSettlementDate,
   getDynamicCommissionExpression,
   getDynamicCommissionRates,
   getActiveCommissionMap,
+  getCommissionRate,
   calculateNurseryFinancialSummary,
   calculateGlobalFinancialSummary,
+  getNurseryFinancialLedger,
+  getPlatformFinancialLedger,
+  getExtendedDateRangeFilter,
   resolveNurseryIdentity,
 } from "../utils/financialUtils";
 import cacheManager from "../utils/cacheManager";
@@ -42,14 +51,6 @@ export interface IGlobalPeriodMetrics {
 }
 
 
-
-// Use centralized paise-safe rounding from financialUtils
-const roundMoney = roundMoney_;
-const getCommissionRate = async (itemModel: string): Promise<number> => {
-  const map = await getActiveCommissionMap();
-  const entry = map[itemModel] || map[itemModel?.toLowerCase?.()];
-  return entry ? entry.commissionPercentage / 100 : 0.30;
-};
 
 // Delegate settlement date to centralized utility
 const formatSettlementDate = getNextSettlementDate;
@@ -125,14 +126,29 @@ const mapOrderLines = async (
     itemModel: string;
     quantity: number;
     price: number;
+    priceAtPurchase?: number;
+    commissionRatePercentage?: number;
+    commissionAmount?: number;
+    nurseryEarnings?: number;
   }>
 ): Promise<IMappedOrderLine[]> =>
   Promise.all(
     items.map(async (item) => {
       const name = await resolveProductName(item.item, item.itemModel);
-      const lineGross = roundMoney(item.price * item.quantity);
-      const rate = await getCommissionRate(item.itemModel);
-      const lineCommission = roundMoney(lineGross * rate);
+      const effectivePrice = Number(item.priceAtPurchase ?? item.price) || 0;
+      const lineGross = calcLineGross(effectivePrice, item.quantity);
+      const rate =
+        item.commissionRatePercentage != null
+          ? item.commissionRatePercentage / 100
+          : await getCommissionRate(item.itemModel);
+      const lineCommission =
+        item.commissionAmount != null
+          ? roundMoney(item.commissionAmount)
+          : calcLineCommission(lineGross, rate);
+      const lineNet =
+        item.nurseryEarnings != null
+          ? roundMoney(item.nurseryEarnings)
+          : calcLineNet(lineGross, lineCommission);
       const category = (CATEGORY_LIST.includes(
         item.itemModel as (typeof CATEGORY_LIST)[number]
       )
@@ -143,10 +159,10 @@ const mapOrderLines = async (
         name,
         quantity: item.quantity,
         category,
-        unitPrice: roundMoney(item.price),
+        unitPrice: roundMoney(effectivePrice),
         lineGross,
         lineCommission,
-        lineNet: roundMoney(lineGross - lineCommission),
+        lineNet,
         label: `${item.quantity}x ${name}`,
       };
     })
@@ -187,82 +203,6 @@ const ensureCategoryPerformance = (
   });
 
 
-const getExtendedDateRangeFilter = (
-  filterType: string,
-  startDate?: string,
-  endDate?: string
-): IExtendedDateRange => {
-  const now = new Date();
-  let start = new Date();
-  let end = new Date();
-
-  switch (filterType) {
-    case "today":
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
-      break;
-    case "yesterday":
-      start.setDate(now.getDate() - 1);
-      start.setHours(0, 0, 0, 0);
-      end.setDate(now.getDate() - 1);
-      end.setHours(23, 59, 59, 999);
-      break;
-    case "this_week": {
-      const day = start.getDay();
-      const diff = start.getDate() - day + (day === 0 ? -6 : 1);
-      start.setDate(diff);
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
-      break;
-    }
-    case "last_week": {
-      const day = start.getDay();
-      const diff = start.getDate() - day - 6 + (day === 0 ? -6 : 1);
-      start.setDate(diff);
-      start.setHours(0, 0, 0, 0);
-      end = new Date(start);
-      end.setDate(start.getDate() + 6);
-      end.setHours(23, 59, 59, 999);
-      break;
-    }
-    case "this_month":
-      start = new Date(now.getFullYear(), now.getMonth(), 1);
-      end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-      break;
-    case "last_month":
-      start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      end = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
-      break;
-    case "this_year":
-      start = new Date(now.getFullYear(), 0, 1);
-      end = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
-      break;
-    case "last_year":
-      start = new Date(now.getFullYear() - 1, 0, 1);
-      end = new Date(now.getFullYear() - 1, 11, 31, 23, 59, 59, 999);
-      break;
-    case "lifetime":
-      start = new Date(2020, 0, 1);
-      end = new Date(now.getFullYear() + 10, 11, 31);
-      break;
-    case "custom":
-      if (startDate && endDate) {
-        start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-      }
-      break;
-    default:
-      start.setDate(now.getDate() - 30);
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
-  }
-
-  return { $gte: start, $lte: end };
-};
-
-
 const emptyPeriodMetrics = (): IPeriodMetrics => ({
   grossRevenue: 0,
   commission: 0,
@@ -277,110 +217,19 @@ const emptyGlobalPeriodMetrics = (): IGlobalPeriodMetrics => ({
   ordersCount: 0,
 });
 
-const getMultiPeriodAggregationPipeline = (
-  matchFilter: Record<string, unknown>,
-  commExpr: unknown
-) => [
-  { $unwind: "$orderItems" },
-  { $match: matchFilter },
-  {
-    $project: {
-      createdAt: 1,
-      itemTotal: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
-      commissionRate: commExpr,
-      orderId: "$_id",
-    },
-  },
-  {
-    $project: {
-      createdAt: 1,
-      itemTotal: 1,
-      orderId: 1,
-      commissionAmount: { $multiply: ["$itemTotal", "$commissionRate"] },
-      nurseryEarning: {
-        $subtract: ["$itemTotal", { $multiply: ["$itemTotal", "$commissionRate"] }],
-      },
-    },
-  },
-  {
-    $group: {
-      _id: null,
-      grossRevenue: { $sum: "$itemTotal" },
-      commission: { $sum: "$commissionAmount" },
-      nurseryEarnings: { $sum: "$nurseryEarning" },
-      ordersCount: { $addToSet: "$orderId" },
-    },
-  },
-  {
-    $project: {
-      _id: 0,
-      grossRevenue: 1,
-      commission: 1,
-      nurseryEarnings: 1,
-      ordersCount: { $size: "$ordersCount" },
-    },
-  },
-];
-
 const getPeriodStats = async (
   tf: string,
   nurseryId?: Types.ObjectId | Types.ObjectId[]
 ): Promise<IPeriodMetrics> => {
-  const range = getExtendedDateRangeFilter(tf);
-  const commExpr = await getDynamicCommissionExpression();
-  const matchFilter: Record<string, unknown> = {
-    createdAt: range,
-    // 🛡️ SECURITY: Mirror financialUtils.ts — only SETTLED items (Delivered/Claimed) count as revenue.
-    // Processing & Shipped are excluded — vendor has NOT earned them yet.
-    "orderItems.status": { $in: ["Delivered", "Claimed"] },
-  };
-  if (nurseryId) {
-    matchFilter["orderItems.nursery"] = Array.isArray(nurseryId) ? { $in: nurseryId } : nurseryId;
-  }
-  const result = await Order.aggregate(getMultiPeriodAggregationPipeline(matchFilter, commExpr));
-  return roundPeriodMetrics((result[0] as IPeriodMetrics) || emptyPeriodMetrics());
+  if (!nurseryId) return emptyPeriodMetrics();
+  const targetId = Array.isArray(nurseryId) ? nurseryId[0] : nurseryId;
+  const ledger = await getNurseryFinancialLedger(targetId, { timeframe: tf });
+  return ledger.selected;
 };
 
 const getGlobalPeriodStats = async (tf: string): Promise<IGlobalPeriodMetrics> => {
-  const range = getExtendedDateRangeFilter(tf);
-  const commExpr = await getDynamicCommissionExpression();
-  const result = await Order.aggregate([
-    { $unwind: "$orderItems" },
-    {
-      $match: {
-        createdAt: range,
-        // 🛡️ SECURITY: Only settled items count toward platform GMV and commission.
-        "orderItems.status": { $in: ["Delivered", "Claimed"] },
-      },
-    },
-    {
-      $project: {
-        itemTotal: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
-        commissionRate: commExpr,
-        orderId: "$_id",
-      },
-    },
-    {
-      $group: {
-        _id: null,
-        grossGMV: { $sum: "$itemTotal" },
-        commission: { $sum: { $multiply: ["$itemTotal", "$commissionRate"] } },
-        ordersCount: { $addToSet: "$orderId" },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        grossGMV: 1,
-        commission: 1,
-        nurseryPayout: { $subtract: ["$grossGMV", "$commission"] },
-        ordersCount: { $size: "$ordersCount" },
-      },
-    },
-  ]);
-  return roundGlobalPeriodMetrics(
-    (result[0] as IGlobalPeriodMetrics) || emptyGlobalPeriodMetrics()
-  );
+  const ledger = await getPlatformFinancialLedger({ timeframe: tf });
+  return ledger.selected;
 };
 
 
@@ -434,23 +283,13 @@ export const getNurseryDashboardStats = catchAsyncErrors(
     const nurseryFinancialMatch = {
       "orderItems.nursery": { $in: nurseryIds },
       createdAt: dateRange,
+      orderStatus: { $ne: "Cancelled" },
       // 🛡️ SECURITY: Only SETTLED items (Delivered/Claimed) contribute to earnings.
-
-      // Consistent with financialUtils.ts authoritative calculation.
       "orderItems.status": { $in: ["Delivered", "Claimed"] },
     };
 
     const [
-      today,
-      yesterday,
-      thisWeek,
-      lastWeek,
-      thisMonth,
-      lastMonth,
-      yearThis,
-      yearLast,
-      lifetime,
-      selectedPeriod,
+      nurseryFinancials,
       categorySales,
       plantCounts,
       potCounts,
@@ -474,17 +313,11 @@ export const getNurseryDashboardStats = catchAsyncErrors(
       trendsRaw,
       itemsSoldAgg,
     ] = await Promise.all([
-      getPeriodStats("today", nurseryIds),
-      getPeriodStats("yesterday", nurseryIds),
-      getPeriodStats("this_week", nurseryIds),
-      getPeriodStats("last_week", nurseryIds),
-      getPeriodStats("this_month", nurseryIds),
-      getPeriodStats("last_month", nurseryIds),
-      getPeriodStats("this_year", nurseryIds),
-      getPeriodStats("last_year", nurseryIds),
-      getPeriodStats("lifetime", nurseryIds),
-
-      Order.aggregate(getMultiPeriodAggregationPipeline(nurseryFinancialMatch, commExpr)),
+      getNurseryFinancialLedger(nurseryId, {
+        timeframe: timeframe as string,
+        startDate: startDate as string | undefined,
+        endDate: endDate as string | undefined,
+      }),
 
       Order.aggregate([
         { $unwind: "$orderItems" },
@@ -492,23 +325,37 @@ export const getNurseryDashboardStats = catchAsyncErrors(
         {
           $project: {
             itemModel: "$orderItems.itemModel",
-            itemTotal: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
+            itemTotal: {
+              $multiply: [
+                { $ifNull: ["$orderItems.priceAtPurchase", "$orderItems.price"] },
+                "$orderItems.quantity",
+              ],
+            },
             commissionRate: commExpr,
+            storedCommission: "$orderItems.commissionAmount",
             orderId: "$_id",
+          },
+        },
+        {
+          $project: {
+            itemModel: 1,
+            itemTotal: 1,
+            orderId: 1,
+            commission: {
+              $ifNull: [
+                "$storedCommission",
+                { $multiply: ["$itemTotal", "$commissionRate"] },
+              ],
+            },
           },
         },
         {
           $group: {
             _id: "$itemModel",
             revenue: { $sum: "$itemTotal" },
-            commission: { $sum: { $multiply: ["$itemTotal", "$commissionRate"] } },
+            commission: { $sum: "$commission" },
             netEarnings: {
-              $sum: {
-                $subtract: [
-                  "$itemTotal",
-                  { $multiply: ["$itemTotal", "$commissionRate"] },
-                ],
-              },
+              $sum: { $subtract: ["$itemTotal", "$commission"] },
             },
             orders: { $addToSet: "$orderId" },
           },
@@ -620,8 +467,27 @@ export const getNurseryDashboardStats = catchAsyncErrors(
           $project: {
             createdAt: 1,
             orderId: "$_id",
-            itemTotal: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
+            itemTotal: {
+              $multiply: [
+                { $ifNull: ["$orderItems.priceAtPurchase", "$orderItems.price"] },
+                "$orderItems.quantity",
+              ],
+            },
             commissionRate: commExpr,
+            storedCommission: "$orderItems.commissionAmount",
+          },
+        },
+        {
+          $project: {
+            createdAt: 1,
+            orderId: 1,
+            itemTotal: 1,
+            commission: {
+              $ifNull: [
+                "$storedCommission",
+                { $multiply: ["$itemTotal", "$commissionRate"] },
+              ],
+            },
           },
         },
         {
@@ -631,12 +497,7 @@ export const getNurseryDashboardStats = catchAsyncErrors(
             },
             grossRevenue: { $sum: "$itemTotal" },
             netPayout: {
-              $sum: {
-                $subtract: [
-                  "$itemTotal",
-                  { $multiply: ["$itemTotal", "$commissionRate"] },
-                ],
-              },
+              $sum: { $subtract: ["$itemTotal", "$commission"] },
             },
             orders: { $addToSet: "$orderId" },
           },
@@ -665,9 +526,7 @@ export const getNurseryDashboardStats = catchAsyncErrors(
       ]),
     ]);
 
-    const selected = roundPeriodMetrics(
-      (selectedPeriod[0] as IPeriodMetrics) || emptyPeriodMetrics()
-    );
+    const selected = nurseryFinancials.selected;
     const pMeta = plantCounts[0] || emptyStockMeta();
     const potMeta = potCounts[0] || emptyStockMeta();
     const accMeta = accessoryCounts[0] || emptyStockMeta();
@@ -743,10 +602,11 @@ export const getNurseryDashboardStats = catchAsyncErrors(
       ...mapLowStockRows(lowStockArtificialDriedPlants as any, "ArtificialDriedPlant"),
     ];
 
+    const nurseryIdsStr = (nurseryIds || []).map((id) => id.toString());
     const mappedRecentOrders = await Promise.all(
       recentOrders.map(async (o) => {
         const nurseryItems = (o.orderItems || []).filter(
-          (item) => item.nursery?.toString() === nurseryId.toString()
+          (item) => item.nursery && nurseryIdsStr.includes(item.nursery.toString())
         );
         const items = await mapOrderLines(nurseryItems);
         const gross = roundMoney(items.reduce((sum, line) => sum + line.lineGross, 0));
@@ -776,19 +636,20 @@ export const getNurseryDashboardStats = catchAsyncErrors(
       })
     );
 
-    const todayR = roundPeriodMetrics(today);
-    const yesterdayR = roundPeriodMetrics(yesterday);
-    const thisWeekR = roundPeriodMetrics(thisWeek);
-    const lastWeekR = roundPeriodMetrics(lastWeek);
-    const thisMonthR = roundPeriodMetrics(thisMonth);
-    const lastMonthR = roundPeriodMetrics(lastMonth);
-    const yearThisR = roundPeriodMetrics(yearThis);
-    const yearLastR = roundPeriodMetrics(yearLast);
-    const lifetimeR = roundPeriodMetrics(lifetime);
+    const todayR = nurseryFinancials.periodBreakdown.today;
+    const yesterdayR = nurseryFinancials.periodBreakdown.yesterday;
+    const thisWeekR = nurseryFinancials.periodBreakdown.thisWeek;
+    const lastWeekR = nurseryFinancials.periodBreakdown.lastWeek;
+    const thisMonthR = nurseryFinancials.periodBreakdown.thisMonth;
+    const lastMonthR = nurseryFinancials.periodBreakdown.lastMonth;
+    const yearThisR = nurseryFinancials.periodBreakdown.thisYear;
+    const yearLastR = nurseryFinancials.periodBreakdown.lastYear;
+    const lifetimeR = nurseryFinancials.periodBreakdown.lifetime;
 
-    const settlement = formatSettlementDate();
-    // 🛡️ AUTHORITATIVE FINANCIAL SUMMARY (Single source of truth via financialUtils)
-    const nurseryFinancials = await calculateNurseryFinancialSummary(nurseryId);
+    const settlement = {
+      iso: nurseryFinancials.nextSettlementDate,
+      label: nurseryFinancials.nextSettlementLabel,
+    };
     const totalPaidOut = nurseryFinancials.totalPaidOut;
     const pendingPayouts = nurseryFinancials.pendingPayouts;
     const availableBalance = nurseryFinancials.availableBalance;
@@ -881,23 +742,22 @@ export const getNurseryDashboardStats = catchAsyncErrors(
         },
       },
       payouts: {
-        // Real DB data from Payout model
+        // Real DB data from Payout model & authoritative ledger
         availableBalance,
         totalPaidOut,
         paidAmount: totalPaidOut,
         pendingPayouts,
-        // 🔧 FIX: Use actual pending payout amount only — never fall back to period earnings.
         pendingPayout: pendingPayouts,
         hasNegativeBalance,
-        // Period-based breakdowns (for dashboard stat cards)
-        weeklyPayable: thisWeekR.nurseryEarnings,
+        // Canonical Golden Equation: Current Week Payable === Available Balance
+        weeklyPayable: nurseryFinancials.weeklyPayable,
         grossLifetimeEarnings: nurseryFinancials.grossEarnings,
         netLifetimeEarnings: nurseryFinancials.netSales,
         totalCommissionLifetime: nurseryFinancials.totalCommission,
-        upcomingSettlement: thisWeekR.nurseryEarnings,
+        upcomingSettlement: nurseryFinancials.upcomingSettlement,
         nextSettlementDate: settlement.iso,
         nextSettlementLabel: settlement.label,
-        status: hasNegativeBalance ? "NegativeBalance" : pendingPayouts > 0 ? "Processing" : "Available",
+        status: nurseryFinancials.status,
       },
       periodMetrics: {
         today: todayR,
@@ -911,8 +771,8 @@ export const getNurseryDashboardStats = catchAsyncErrors(
         lifetime: lifetimeR,
       },
       settlementInfo: {
-        currentWeekSettlement: thisWeekR.nurseryEarnings,
-        lastWeekSettlement: lastWeekR.nurseryEarnings,
+        currentWeekSettlement: nurseryFinancials.weeklyPayable,
+        lastWeekSettlement: nurseryFinancials.pendingPayouts,
         status: "Processing",
         nextSettlementDate: settlement.iso,
         nextSettlementLabel: settlement.label,
@@ -962,23 +822,13 @@ export const getAdminDashboardStats = catchAsyncErrors(
     const rangeMatch = { createdAt: dateRange };
     const rangeFinancialMatch = {
       createdAt: dateRange,
+      orderStatus: { $ne: "Cancelled" },
       // 🛡️ SECURITY: Only SETTLED items (Delivered/Claimed) count as platform revenue.
-      // Consistent with financialUtils.ts — excludes Processing, Shipped, and Cancelled.
       "orderItems.status": { $in: ["Delivered", "Claimed"] },
     };
 
-
     const [
-      today,
-      yesterday,
-      thisWeek,
-      lastWeek,
-      thisMonth,
-      lastMonth,
-      yearThis,
-      yearLast,
-      lifetime,
-      selectedPeriod,
+      platformLedger,
       userSplit,
       topNurseries,
       recentPlatformOrders,
@@ -1003,44 +853,11 @@ export const getAdminDashboardStats = catchAsyncErrors(
       trendsRaw,
       topSellingRaw,
     ] = await Promise.all([
-      getGlobalPeriodStats("today"),
-      getGlobalPeriodStats("yesterday"),
-      getGlobalPeriodStats("this_week"),
-      getGlobalPeriodStats("last_week"),
-      getGlobalPeriodStats("this_month"),
-      getGlobalPeriodStats("last_month"),
-      getGlobalPeriodStats("this_year"),
-      getGlobalPeriodStats("last_year"),
-      getGlobalPeriodStats("lifetime"),
-
-      Order.aggregate([
-        { $unwind: "$orderItems" },
-        { $match: rangeFinancialMatch },
-        {
-          $project: {
-            itemTotal: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
-            commissionRate: commExpr,
-            orderId: "$_id",
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            grossGMV: { $sum: "$itemTotal" },
-            commission: { $sum: { $multiply: ["$itemTotal", "$commissionRate"] } },
-            ordersCount: { $addToSet: "$orderId" },
-          },
-        },
-        {
-          $project: {
-            _id: 0,
-            grossGMV: 1,
-            commission: 1,
-            nurseryPayout: { $subtract: ["$grossGMV", "$commission"] },
-            ordersCount: { $size: "$ordersCount" },
-          },
-        },
-      ]),
+      getPlatformFinancialLedger({
+        timeframe: timeframe as string,
+        startDate: startDate as string | undefined,
+        endDate: endDate as string | undefined,
+      }),
 
       User.aggregate([{ $group: { _id: "$role", count: { $sum: 1 } } }]),
 
@@ -1051,8 +868,27 @@ export const getAdminDashboardStats = catchAsyncErrors(
           $project: {
             nursery: "$orderItems.nursery",
             quantity: "$orderItems.quantity",
-            itemTotal: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
+            itemTotal: {
+              $multiply: [
+                { $ifNull: ["$orderItems.priceAtPurchase", "$orderItems.price"] },
+                "$orderItems.quantity",
+              ],
+            },
             commissionRate: commExpr,
+            storedCommission: "$orderItems.commissionAmount",
+          },
+        },
+        {
+          $project: {
+            nursery: 1,
+            quantity: 1,
+            itemTotal: 1,
+            commission: {
+              $ifNull: [
+                "$storedCommission",
+                { $multiply: ["$itemTotal", "$commissionRate"] },
+              ],
+            },
           },
         },
         {
@@ -1060,9 +896,7 @@ export const getAdminDashboardStats = catchAsyncErrors(
             _id: "$nursery",
             totalSalesValue: { $sum: "$itemTotal" },
             itemsSold: { $sum: "$quantity" },
-            commissionGenerated: {
-              $sum: { $multiply: ["$itemTotal", "$commissionRate"] },
-            },
+            commissionGenerated: { $sum: "$commission" },
           },
         },
         { $sort: { totalSalesValue: -1 } },
@@ -1147,23 +981,37 @@ export const getAdminDashboardStats = catchAsyncErrors(
         {
           $project: {
             itemModel: "$orderItems.itemModel",
-            itemTotal: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
+            itemTotal: {
+              $multiply: [
+                { $ifNull: ["$orderItems.priceAtPurchase", "$orderItems.price"] },
+                "$orderItems.quantity",
+              ],
+            },
             commissionRate: commExpr,
+            storedCommission: "$orderItems.commissionAmount",
             orderId: "$_id",
+          },
+        },
+        {
+          $project: {
+            itemModel: 1,
+            itemTotal: 1,
+            orderId: 1,
+            commission: {
+              $ifNull: [
+                "$storedCommission",
+                { $multiply: ["$itemTotal", "$commissionRate"] },
+              ],
+            },
           },
         },
         {
           $group: {
             _id: "$itemModel",
             revenue: { $sum: "$itemTotal" },
-            commission: { $sum: { $multiply: ["$itemTotal", "$commissionRate"] } },
+            commission: { $sum: "$commission" },
             netEarnings: {
-              $sum: {
-                $subtract: [
-                  "$itemTotal",
-                  { $multiply: ["$itemTotal", "$commissionRate"] },
-                ],
-              },
+              $sum: { $subtract: ["$itemTotal", "$commission"] },
             },
             orders: { $addToSet: "$orderId" },
           },
@@ -1187,8 +1035,27 @@ export const getAdminDashboardStats = catchAsyncErrors(
           $project: {
             createdAt: 1,
             orderId: "$_id",
-            itemTotal: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
+            itemTotal: {
+              $multiply: [
+                { $ifNull: ["$orderItems.priceAtPurchase", "$orderItems.price"] },
+                "$orderItems.quantity",
+              ],
+            },
             commissionRate: commExpr,
+            storedCommission: "$orderItems.commissionAmount",
+          },
+        },
+        {
+          $project: {
+            createdAt: 1,
+            orderId: 1,
+            itemTotal: 1,
+            commission: {
+              $ifNull: [
+                "$storedCommission",
+                { $multiply: ["$itemTotal", "$commissionRate"] },
+              ],
+            },
           },
         },
         {
@@ -1198,16 +1065,9 @@ export const getAdminDashboardStats = catchAsyncErrors(
             },
             grossRevenue: { $sum: "$itemTotal" },
             netPayout: {
-              $sum: {
-                $subtract: [
-                  "$itemTotal",
-                  { $multiply: ["$itemTotal", "$commissionRate"] },
-                ],
-              },
+              $sum: { $subtract: ["$itemTotal", "$commission"] },
             },
-            commission: {
-              $sum: { $multiply: ["$itemTotal", "$commissionRate"] },
-            },
+            commission: { $sum: "$commission" },
             orders: { $addToSet: "$orderId" },
           },
         },
@@ -1228,22 +1088,41 @@ export const getAdminDashboardStats = catchAsyncErrors(
         { $unwind: "$orderItems" },
         { $match: rangeFinancialMatch },
         {
-          $group: {
-            _id: "$orderItems.item",
-            itemType: { $first: "$orderItems.itemModel" },
-            quantitySold: { $sum: "$orderItems.quantity" },
-            grossRevenue: {
-              $sum: { $multiply: ["$orderItems.price", "$orderItems.quantity"] },
+          $project: {
+            item: "$orderItems.item",
+            itemModel: "$orderItems.itemModel",
+            quantity: "$orderItems.quantity",
+            itemTotal: {
+              $multiply: [
+                { $ifNull: ["$orderItems.priceAtPurchase", "$orderItems.price"] },
+                "$orderItems.quantity",
+              ],
             },
+            commissionRate: commExpr,
+            storedCommission: "$orderItems.commissionAmount",
+          },
+        },
+        {
+          $project: {
+            item: 1,
+            itemModel: 1,
+            quantity: 1,
+            itemTotal: 1,
             commission: {
-              $sum: {
-                $multiply: [
-                  "$orderItems.price",
-                  "$orderItems.quantity",
-                  commExpr,
-                ],
-              },
+              $ifNull: [
+                "$storedCommission",
+                { $multiply: ["$itemTotal", "$commissionRate"] },
+              ],
             },
+          },
+        },
+        {
+          $group: {
+            _id: "$item",
+            itemType: { $first: "$itemModel" },
+            quantitySold: { $sum: "$quantity" },
+            grossRevenue: { $sum: "$itemTotal" },
+            commission: { $sum: "$commission" },
           },
         },
         {
@@ -1259,9 +1138,7 @@ export const getAdminDashboardStats = catchAsyncErrors(
       ]),
     ]);
 
-    const selected = roundGlobalPeriodMetrics(
-      (selectedPeriod[0] as IGlobalPeriodMetrics) || emptyGlobalPeriodMetrics()
-    );
+    const selected = platformLedger.selected;
 
     const userMap: Record<string, number> = { user: 0, nursery: 0, admin: 0 };
     userSplit.forEach((u: { _id: string; count: number }) => {
@@ -1399,34 +1276,22 @@ export const getAdminDashboardStats = catchAsyncErrors(
       })
     );
 
-    const todayR = roundGlobalPeriodMetrics(today);
-    const yesterdayR = roundGlobalPeriodMetrics(yesterday);
-    const thisWeekR = roundGlobalPeriodMetrics(thisWeek);
-    const lastWeekR = roundGlobalPeriodMetrics(lastWeek);
-    const thisMonthR = roundGlobalPeriodMetrics(thisMonth);
-    const lastMonthR = roundGlobalPeriodMetrics(lastMonth);
-    const yearThisR = roundGlobalPeriodMetrics(yearThis);
-    const yearLastR = roundGlobalPeriodMetrics(yearLast);
-    const lifetimeR = roundGlobalPeriodMetrics(lifetime);
+    const todayR = platformLedger.periodBreakdown.today;
+    const yesterdayR = platformLedger.periodBreakdown.yesterday;
+    const thisWeekR = platformLedger.periodBreakdown.thisWeek;
+    const lastWeekR = platformLedger.periodBreakdown.lastWeek;
+    const thisMonthR = platformLedger.periodBreakdown.thisMonth;
+    const lastMonthR = platformLedger.periodBreakdown.lastMonth;
+    const yearThisR = platformLedger.periodBreakdown.thisYear;
+    const yearLastR = platformLedger.periodBreakdown.lastYear;
+    const lifetimeR = platformLedger.periodBreakdown.lifetime;
 
-    const settlement = formatSettlementDate();
-    const lifetimeSettled = roundMoney(
-      Math.max(
-        0,
-        lifetimeR.nurseryPayout - thisWeekR.nurseryPayout - lastWeekR.nurseryPayout
-      )
-    );
-
-    // 🛡️ AUTHORITATIVE GLOBAL FINANCIAL SUMMARY (Single source of truth via financialUtils)
-    const globalFinancials = await calculateGlobalFinancialSummary();
-    const totalPaidOut = globalFinancials.totalCompletedPayouts;
-    const pendingPayouts = globalFinancials.totalPendingPayouts;
-
-    // Harmonize lifetime metrics with authoritative calculation
-    lifetimeR.grossGMV = globalFinancials.grossGMV;
-    lifetimeR.commission = globalFinancials.platformCommission;
-    lifetimeR.nurseryPayout = globalFinancials.nurseryPayoutPayable;
-    lifetimeR.ordersCount = globalFinancials.totalOrdersCount;
+    const settlement = {
+      iso: platformLedger.nextSettlementDate,
+      label: platformLedger.nextSettlementLabel,
+    };
+    const totalPaidOut = platformLedger.totalCompletedPayouts;
+    const pendingPayouts = platformLedger.totalPendingPayouts;
 
     const totalProducts =
       pMeta.total +
@@ -1517,16 +1382,14 @@ export const getAdminDashboardStats = catchAsyncErrors(
       },
       payouts: {
         totalPaidOut,
-        // 🔧 FIX: Always use actual completed payout amount. Never fall back to estimated earnings.
         paidAmount: totalPaidOut,
         pendingPayouts,
-        // 🔧 FIX: Return actual pending amount only — never fall back to period earnings.
         pendingPayout: pendingPayouts,
-        weeklyPayable: thisWeekR.nurseryPayout,
-        upcomingSettlement: thisWeekR.commission,
+        weeklyPayable: platformLedger.weeklyPayable,
+        upcomingSettlement: platformLedger.upcomingSettlement,
         nextSettlementDate: settlement.iso,
         nextSettlementLabel: settlement.label,
-        status: pendingPayouts > 0 ? "Processing" : "Available",
+        status: platformLedger.status,
       },
       periodMetrics: {
         today: todayR,
