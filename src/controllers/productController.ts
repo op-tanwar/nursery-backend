@@ -45,81 +45,119 @@ export const plantAttributesSchema = z.object({
   lightRequirement: z.string().optional(),
   wateringSchedule: z.string().optional(),
   maintenanceLevel: z.string().optional(),
-  isPetFriendly: z.boolean().optional(),
-  benefits: z.array(z.string()).optional(),
-  careInstructions: z.array(z.string()).optional(),
+  isPetFriendly: z.preprocess((v) => v === true || v === "true", z.boolean().optional()),
+  benefits: z.preprocess((v) => (typeof v === "string" ? [v] : v), z.array(z.string()).optional()),
+  careInstructions: z.preprocess((v) => (typeof v === "string" ? [v] : v), z.array(z.string()).optional()),
   plantType: z.string().optional(),
+  subCategory: z.string().optional(),
 }).passthrough();
 
 export const potAttributesSchema = z.object({
   material: z.string().optional(),
   color: z.union([z.string(), z.array(z.string())]).optional(),
-  dimensions: z.object({
-    height: z.string().optional(),
-    diameter: z.string().optional(),
-    width: z.string().optional(),
-    length: z.string().optional(),
-  }).optional(),
-  drainageHoles: z.boolean().optional(),
-  hasDrainageHole: z.boolean().optional(),
+  dimensions: z.union([
+    z.string(),
+    z.object({
+      height: z.any().optional(),
+      diameter: z.any().optional(),
+      width: z.any().optional(),
+      length: z.any().optional(),
+    }),
+  ]).optional(),
+  drainageHoles: z.union([z.boolean(), z.string()]).optional(),
+  hasDrainageHole: z.union([z.boolean(), z.string()]).optional(),
   shape: z.string().optional(),
   isIndoorOutdoor: z.string().optional(),
-  includesSaucer: z.boolean().optional(),
+  includesSaucer: z.union([z.boolean(), z.string()]).optional(),
+  subCategory: z.string().optional(),
 }).passthrough();
 
 export const accessoryAttributesSchema = z.object({
   material: z.string().optional(),
   brand: z.string().optional(),
-  weight: z.string().optional(),
-  capacity: z.string().optional(),
+  weight: z.union([z.string(), z.number()]).optional(),
+  capacity: z.union([z.string(), z.number()]).optional(),
   usageType: z.string().optional(),
+  dimensions: z.union([
+    z.string(),
+    z.object({
+      height: z.any().optional(),
+      width: z.any().optional(),
+      length: z.any().optional(),
+    }),
+  ]).optional(),
+  specifications: z.record(z.string(), z.any()).optional(),
+  subCategory: z.string().optional(),
 }).passthrough();
 
 export const gardeningToolAttributesSchema = z.object({
-  features: z.array(z.string()).optional(),
+  features: z.preprocess((v) => (typeof v === "string" ? [v] : v), z.array(z.string()).optional()),
   material: z.string().optional(),
   handleMaterial: z.string().optional(),
-  warrantyMonths: z.number().optional(),
+  warrantyMonths: z.preprocess(
+    (v) => (v !== undefined && v !== "" && v !== null ? Number(v) : undefined),
+    z.number().optional()
+  ),
   toolType: z.string().optional(),
+  subCategory: z.string().optional(),
 }).passthrough();
 
 export const plantCareAttributesSchema = z.object({
   composition: z.string().optional(),
-  howToUse: z.array(z.string()).optional(),
-  volumeOrWeight: z.string().optional(),
+  howToUse: z.preprocess((v) => (typeof v === "string" ? [v] : v), z.array(z.string()).optional()),
+  volumeOrWeight: z.union([z.string(), z.number()]).optional(),
   formType: z.string().optional(),
-  suitableFor: z.array(z.string()).optional(),
+  suitableFor: z.preprocess((v) => (typeof v === "string" ? [v] : v), z.array(z.string()).optional()),
+  isOrganic: z.union([z.boolean(), z.string()]).optional(),
+  subCategory: z.string().optional(),
 }).passthrough();
 
 export const seedsBulbsAttributesSchema = z.object({
   sowingSeason: z.union([z.string(), z.array(z.string())]).optional(),
   germinationTime: z.union([z.string(), z.number()]).optional(),
   germinationDays: z.union([z.string(), z.number()]).optional(),
-  quantityPerPack: z.string().optional(),
+  quantityPerPack: z.union([z.string(), z.number()]).optional(),
   sunlightRequirement: z.string().optional(),
   seedType: z.string().optional(),
+  subCategory: z.string().optional(),
 }).passthrough();
 
 export const standsShelvesAttributesSchema = z.object({
   material: z.string().optional(),
-  dimensions: z.object({
-    height: z.string().optional(),
-    width: z.string().optional(),
-    length: z.string().optional(),
-  }).optional(),
-  tierCount: z.number().optional(),
-  maxLoadCapacity: z.string().optional(),
-  isFoldable: z.boolean().optional(),
+  dimensions: z.union([
+    z.string(),
+    z.object({
+      height: z.any().optional(),
+      width: z.any().optional(),
+      length: z.any().optional(),
+    }),
+  ]).optional(),
+  tierCount: z.preprocess(
+    (v) => (v !== undefined && v !== "" && v !== null ? Number(v) : undefined),
+    z.number().optional()
+  ),
+  maxLoadCapacity: z.preprocess(
+    (v) => (v !== undefined && v !== null ? String(v) : undefined),
+    z.string().optional()
+  ),
+  weightCapacityKg: z.preprocess(
+    (v) => (v !== undefined && v !== null ? String(v) : undefined),
+    z.string().optional()
+  ),
+  isFoldable: z.union([z.boolean(), z.string()]).optional(),
+  subCategory: z.string().optional(),
 }).passthrough();
 
 export const artificialDriedAttributesSchema = z.object({
   material: z.string().optional(),
-  height: z.string().optional(),
+  height: z.union([z.string(), z.number()]).optional(),
   color: z.string().optional(),
   brand: z.string().optional(),
-  includesVase: z.boolean().optional(),
-  potIncluded: z.boolean().optional(),
-  washable: z.boolean().optional(),
+  includesVase: z.union([z.boolean(), z.string()]).optional(),
+  potIncluded: z.union([z.boolean(), z.string()]).optional(),
+  washable: z.union([z.boolean(), z.string()]).optional(),
+  specifications: z.record(z.string(), z.any()).optional(),
+  subCategory: z.string().optional(),
 }).passthrough();
 
 export const validateCategoryAttributes = (
@@ -128,11 +166,13 @@ export const validateCategoryAttributes = (
 ): Record<string, any> => {
   if (!attributes) return {};
   const parsedAttr = typeof attributes === "string" ? JSON.parse(attributes) : attributes;
+  const normCat = normalizeCategory(category) || category;
 
-  switch (category) {
+  switch (normCat) {
     case "plants":
       return plantAttributesSchema.parse(parsedAttr);
     case "pots":
+    case "pots-planters":
       return potAttributesSchema.parse(parsedAttr);
     case "accessories":
       return accessoryAttributesSchema.parse(parsedAttr);
@@ -143,9 +183,11 @@ export const validateCategoryAttributes = (
     case "seeds-bulbs":
       return seedsBulbsAttributesSchema.parse(parsedAttr);
     case "plant-stands-shelves":
+    case "plant-stands-and-shelves":
     case "stands-shelves":
       return standsShelvesAttributesSchema.parse(parsedAttr);
     case "artificial-dried":
+    case "artificial-dried-plants":
       return artificialDriedAttributesSchema.parse(parsedAttr);
     default:
       return parsedAttr;
@@ -176,10 +218,16 @@ const CATEGORY_PAYLOAD_MAP: Record<string, ProductCategory> = {
   potData: "pots",
   accessoryData: "accessories",
   gardeningToolData: "gardening-tools",
+  toolData: "gardening-tools",
   plantCareData: "plant-care",
+  careData: "plant-care",
   seedsBulbsData: "seeds-bulbs",
+  seedData: "seeds-bulbs",
   plantStandsShelvesData: "plant-stands-shelves",
+  standData: "plant-stands-shelves",
   artificialDriedPlantData: "artificial-dried",
+  artificialData: "artificial-dried",
+  productData: "plants",
 };
 
 export const normalizeCategory = (cat?: any): ProductCategory | undefined => {
@@ -195,17 +243,22 @@ export const normalizeCategory = (cat?: any): ProductCategory | undefined => {
   return undefined;
 };
 
-const extractProductPayload = (body: any) => {
+export const extractProductPayload = (body: any) => {
   const payloadKeys = [
     "productData",
     "plantData",
     "potData",
     "accessoryData",
     "gardeningToolData",
+    "toolData",
     "plantCareData",
+    "careData",
     "seedsBulbsData",
+    "seedData",
     "plantStandsShelvesData",
+    "standData",
     "artificialDriedPlantData",
+    "artificialData",
   ];
   let extracted = { ...body };
   let detectedCategory: ProductCategory | undefined = normalizeCategory(body.category);
@@ -253,13 +306,19 @@ const extractProductPayload = (body: any) => {
     }
   }
 
+  // If specifications object was provided (accessories, artificial-dried), merge into baseAttrs
+  if (extracted.specifications && typeof extracted.specifications === "object") {
+    baseAttrs = { ...extracted.specifications, ...baseAttrs };
+  }
+
   // Gather any non-common top-level fields into baseAttrs
   for (const [k, v] of Object.entries(extracted)) {
     if (
       !COMMON_PRODUCT_KEYS.has(k) &&
       !payloadKeys.includes(k) &&
       k !== "attributes" &&
-      k !== "subCategory"
+      k !== "subCategory" &&
+      k !== "specifications"
     ) {
       if (baseAttrs[k] === undefined && v !== undefined) {
         baseAttrs[k] = v;
@@ -379,7 +438,7 @@ export const createProduct = catchAsyncErrors(
       category,
       nursery: nurseryId,
       price: Number(price),
-      discountPrice: discountPrice !== undefined ? Number(discountPrice) : 0,
+      discountPrice: discountPrice !== undefined && discountPrice !== "" ? Number(discountPrice) : 0,
       stock: Number(stock),
       description,
       descriptionOption: typeof descriptionOption === "string" ? JSON.parse(descriptionOption) : descriptionOption,
@@ -408,7 +467,9 @@ export const createProduct = catchAsyncErrors(
       plantCare: product,
       seedsBulbs: product,
       plantStandsShelves: product,
+      stand: product,
       artificial: product,
+      artificialDriedPlant: product,
     });
   }
 );
@@ -920,6 +981,42 @@ export const updateProduct = catchAsyncErrors(
       }
     }
 
+    // 🖼️ 1. Retain existing images if passed (handles user deletions from gallery in edit mode)
+    if (req.body.existingImages) {
+      try {
+        const existingImagesParsed =
+          typeof req.body.existingImages === "string"
+            ? JSON.parse(req.body.existingImages)
+            : req.body.existingImages;
+        if (Array.isArray(existingImagesParsed)) {
+          product.images = existingImagesParsed;
+        }
+      } catch (e) {
+        console.warn("⚠️ Failed to parse existingImages:", e);
+      }
+    }
+
+    // 🗑️ 2. Delete removed images from Cloudinary and product.images
+    if (req.body.deletedImagePublicIds) {
+      try {
+        const deletedIds =
+          typeof req.body.deletedImagePublicIds === "string"
+            ? JSON.parse(req.body.deletedImagePublicIds)
+            : req.body.deletedImagePublicIds;
+        if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+          product.images = product.images.filter(
+            (img: any) => !deletedIds.includes(img.public_id)
+          );
+          // Delete from Cloudinary in background (non-blocking)
+          Promise.allSettled(
+            deletedIds.map((pid: string) => deleteFromCloudinary(pid))
+          ).catch((err) => console.warn("Cloudinary cleanup error:", err));
+        }
+      } catch (e) {
+        console.warn("⚠️ Failed to parse deletedImagePublicIds:", e);
+      }
+    }
+
     // Process new uploaded images
     if (req.files) {
       const filesObj = req.files;
@@ -928,7 +1025,9 @@ export const updateProduct = catchAsyncErrors(
         const coverFile = Array.isArray(filesObj.coverImage) ? filesObj.coverImage[0] : filesObj.coverImage;
         const upload = await uploadToCloudinary(coverFile, `urban-nursery/products/${product.category}/cover`);
         product.coverImage = { url: upload.url, public_id: upload.publicId };
-        product.images.unshift(product.coverImage);
+        if (!product.images.some((img: any) => img.public_id === upload.publicId)) {
+          product.images.unshift(product.coverImage);
+        }
       }
 
       const fileList: UploadedFile[] = [];
@@ -949,8 +1048,11 @@ export const updateProduct = catchAsyncErrors(
           public_id: upload.publicId,
         });
       }
+    }
 
-      if (!product.coverImage || !product.coverImage.url) {
+    // Guarantee valid coverImage
+    if (!product.coverImage || !product.coverImage.url) {
+      if (product.images.length > 0) {
         product.coverImage = product.images[0];
       }
     }
@@ -976,7 +1078,9 @@ export const updateProduct = catchAsyncErrors(
       plantCare: product,
       seedsBulbs: product,
       plantStandsShelves: product,
+      stand: product,
       artificial: product,
+      artificialDriedPlant: product,
     });
   }
 );
@@ -1081,8 +1185,18 @@ export const getMyNurseryProducts = catchAsyncErrors(
     if (category) {
       const norm = normalizeCategory(category);
       if (norm) {
-        if (norm === "plant-stands-shelves" || norm === "stands-shelves") {
-          filter.category = { $in: ["plant-stands-shelves", "stands-shelves"] };
+        if (
+          norm === "plant-stands-shelves" ||
+          norm === "stands-shelves" ||
+          (norm as string) === "plant-stands-and-shelves"
+        ) {
+          filter.category = {
+            $in: ["plant-stands-shelves", "stands-shelves", "plant-stands-and-shelves"],
+          };
+        } else if (norm === "artificial-dried" || (norm as string) === "artificial-dried-plants") {
+          filter.category = { $in: ["artificial-dried", "artificial-dried-plants"] };
+        } else if (norm === "pots" || (norm as string) === "pots-planters") {
+          filter.category = { $in: ["pots", "pots-planters"] };
         } else {
           filter.category = norm;
         }
@@ -1096,13 +1210,20 @@ export const getMyNurseryProducts = catchAsyncErrors(
       count: products.length,
       products,
       plants: products.filter((p) => p.category === "plants"),
-      pots: products.filter((p) => p.category === "pots"),
+      pots: products.filter((p) => p.category === "pots" || p.category === "pots-planters"),
       accessories: products.filter((p) => p.category === "accessories"),
       gardeningTools: products.filter((p) => p.category === "gardening-tools"),
       plantCare: products.filter((p) => p.category === "plant-care"),
       seedsBulbs: products.filter((p) => p.category === "seeds-bulbs"),
-      plantStandsShelves: products.filter((p) => p.category === "plant-stands-shelves" || p.category === "stands-shelves"),
-      artificials: products.filter((p) => p.category === "artificial-dried"),
+      plantStandsShelves: products.filter(
+        (p) =>
+          p.category === "plant-stands-shelves" ||
+          p.category === "stands-shelves" ||
+          p.category === "plant-stands-and-shelves"
+      ),
+      artificials: products.filter(
+        (p) => p.category === "artificial-dried" || p.category === "artificial-dried-plants"
+      ),
     });
   }
 );

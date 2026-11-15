@@ -22,8 +22,10 @@ export const PRODUCT_CATEGORIES = [
   "plant-care",
   "seeds-bulbs",
   "plant-stands-shelves",
+  "plant-stands-and-shelves",
   "stands-shelves",
   "artificial-dried",
+  "artificial-dried-plants",
 ] as const;
 
 export type ProductCategory = (typeof PRODUCT_CATEGORIES)[number];
@@ -86,21 +88,25 @@ export interface SeedsBulbsAttributes {
 export interface StandsShelvesAttributes {
   material?: string;
   dimensions?: {
-    height?: string;
-    width?: string;
-    length?: string;
-  };
-  tierCount?: number;
-  maxLoadCapacity?: string;
-  isFoldable?: boolean;
+    height?: string | number;
+    width?: string | number;
+    length?: string | number;
+  } | string;
+  tierCount?: number | string;
+  maxLoadCapacity?: string | number;
+  weightCapacityKg?: string | number;
+  isFoldable?: boolean | string;
 }
 
 export interface ArtificialDriedAttributes {
   material?: string;
-  height?: string;
+  height?: string | number;
   color?: string;
   brand?: string;
-  includesVase?: boolean;
+  includesVase?: boolean | string;
+  potIncluded?: boolean | string;
+  washable?: boolean | string;
+  specifications?: Record<string, any>;
 }
 
 export type CategoryAttributes =
