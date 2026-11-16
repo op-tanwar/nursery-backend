@@ -498,6 +498,7 @@ export const getAllProducts = catchAsyncErrors(
 
     const {
       category,
+      type,
       nursery,
       vendor,
       isPublished,
@@ -524,7 +525,8 @@ export const getAllProducts = catchAsyncErrors(
       baseFilter.isNurseryActive = true;
     }
 
-    const normCategory = normalizeCategory(category);
+    const effectiveCategory = category || (type && type !== "All" && type !== "all" ? type : undefined);
+    const normCategory = normalizeCategory(effectiveCategory);
     if (normCategory) {
       if (normCategory === "plant-stands-shelves" || normCategory === "stands-shelves") {
         baseFilter.category = { $in: ["plant-stands-shelves", "stands-shelves"] };
@@ -646,9 +648,16 @@ export const getAllProducts = catchAsyncErrors(
 
         if (!targetNursery) {
           if (serviceableNurseryIds.size > 0) {
+            const activeServiceable = Array.from(serviceableNurseryIds).filter((id) =>
+              activeNurseryIds.includes(id)
+            );
+            const activeServiceableObjIds = activeServiceable
+              .filter((id) => mongoose.Types.ObjectId.isValid(id))
+              .map((id) => new mongoose.Types.ObjectId(id));
+
             const geoOrCondition = [
               { shippingType: "NATIONAL_COURIER" },
-              { nursery: { $in: Array.from(serviceableNurseryIds) } },
+              { nursery: { $in: [...activeServiceable, ...activeServiceableObjIds] } },
             ];
             if (!baseFilter.$or) {
               baseFilter.$or = geoOrCondition;
@@ -689,8 +698,8 @@ export const getAllProducts = catchAsyncErrors(
     if (req.user?.role !== "admin") {
       const activeSet = new Set(activeNurseryIds);
       finalProducts = rawProducts.filter((p: any) => {
-        if (p.isNurseryActive === false) return false;
-        if (p.isPublished === false || p.isActive === false) return false;
+        if (p.isNurseryActive !== true) return false;
+        if (p.isPublished !== true || p.isActive !== true) return false;
         if (!p.nursery) return false;
         const nurseryId =
           typeof p.nursery === "object" && p.nursery._id
@@ -920,8 +929,8 @@ export const getFeaturedProducts = catchAsyncErrors(
     if (req.user?.role !== "admin") {
       const activeSet = new Set(activeNurseryIds);
       serviceableProducts = serviceableProducts.filter((p: any) => {
-        if (p.isNurseryActive === false) return false;
-        if (p.isPublished === false || p.isActive === false) return false;
+        if (p.isNurseryActive !== true) return false;
+        if (p.isPublished !== true || p.isActive !== true) return false;
         if (!p.nursery) return false;
         const nurseryId =
           typeof p.nursery === "object" && p.nursery._id

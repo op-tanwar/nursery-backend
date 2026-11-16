@@ -428,55 +428,63 @@ export const toggleNurseryStatus = catchAsyncErrors(
     let updatedProfile = null;
     let targetUserId = null;
 
-    updatedProfile = await NurseryProfile.findById(id);
+    if (mongoose.isValidObjectId(id)) {
+      updatedProfile = await NurseryProfile.findById(id);
+      if (!updatedProfile) {
+        updatedProfile = await NurseryProfile.findOne({ nursery: id });
+      }
+    }
 
     if (updatedProfile) {
-      targetUserId = updatedProfile.nursery;
+      targetUserId = updatedProfile.nursery ? updatedProfile.nursery.toString() : null;
     } else {
       targetUserId = id;
     }
 
-    const targetUser = await User.findById(targetUserId);
-
-    if (!targetUser) {
-      return next(new ErrorHandler("Associated user account not found in the cluster.", 404));
+    // 1. Update associated User record if present
+    if (targetUserId && mongoose.isValidObjectId(targetUserId)) {
+      await User.findByIdAndUpdate(targetUserId, {
+        $set: { isActive, status: isActive ? "Active" : "Suspended" },
+      });
     }
 
-    if (targetUser.role !== "nursery") {
-      return next(
-        new ErrorHandler(
-          "Access denied. Target user does not possess a valid nursery vendor role authorization.",
-          403
-        )
+    // 2. Update NurseryProfile document
+    if (updatedProfile) {
+      updatedProfile.isActive = isActive;
+      await updatedProfile.save();
+    } else if (mongoose.isValidObjectId(id)) {
+      updatedProfile = await NurseryProfile.findOneAndUpdate(
+        { $or: [{ _id: id }, { nursery: id }] },
+        { $set: { isActive } },
+        { new: true, runValidators: true }
       );
     }
-
-    targetUser.isActive = isActive;
-    targetUser.status = isActive ? "Active" : "Suspended";
-    await User.findByIdAndUpdate(targetUserId, {
-      $set: { isActive, status: isActive ? "Active" : "Suspended" },
-    });
-
-    updatedProfile = await NurseryProfile.findOneAndUpdate(
-      { nursery: targetUserId },
-      { $set: { isActive } },
-      { new: true, runValidators: true }
-    );
 
     if (!updatedProfile) {
-      return next(
-        new ErrorHandler("Nursery profile structural record matrix not found for this vendor.", 404)
-      );
+      // Fallback: check if target user exists to confirm valid entity
+      const userCheck = targetUserId ? await User.findById(targetUserId) : null;
+      if (!userCheck) {
+        return next(
+          new ErrorHandler("Nursery profile or user account not found for this identifier.", 404)
+        );
+      }
     }
 
-    // ⚡ Real-time Product synchronization & Cache invalidation
-    const isLive = isActive && updatedProfile.approvalStatus === "Approved";
-    await syncNurseryProductsActiveStatus(String(targetUserId), isLive);
+    // ⚡ Real-time Product synchronization & Cache invalidation across all identity variations
+    const nurseryIdsToSync = [
+      id,
+      targetUserId,
+      updatedProfile?._id,
+      updatedProfile?.nursery,
+    ].filter(Boolean);
+
+    const isLive = isActive && (updatedProfile ? updatedProfile.approvalStatus === "Approved" : true);
+    await syncNurseryProductsActiveStatus(nurseryIdsToSync as any, isLive);
 
     res.status(200).json({
       success: true,
-      message: `Nursery profile and associated user account status successfully updated to ${updatedProfile.isActive ? "Active" : "Inactive"}.`,
-      isActive: updatedProfile.isActive,
+      message: `Nursery profile and associated user account status successfully updated to ${isActive ? "Active" : "Inactive"}.`,
+      isActive,
     });
   }
 );

@@ -4,6 +4,7 @@ import User from "../models/userModel";
 import Product from "../models/productModel";
 import ErrorHandler from "./errorHandler";
 import cacheManager from "./cacheManager";
+import { triggerFrontendRevalidation } from "./frontendRevalidation";
 
 export interface ResolvedNurseryIdentity {
   /** The canonical multi-vendor storefront ID (NurseryProfile._id) */
@@ -234,19 +235,53 @@ export const invalidateNurseryCache = async (nurseryId?: string): Promise<void> 
       ? cacheManager.invalidatePattern(`nursery:${nurseryId}:`)
       : cacheManager.invalidatePattern("nursery:"),
   ]);
+
+  // Non-blocking Next.js edge revalidation trigger
+  triggerFrontendRevalidation().catch(() => {});
 };
 
 /**
  * 🔄 Synchronize product visibility flag (`isNurseryActive`) for a nursery
  */
 export const syncNurseryProductsActiveStatus = async (
-  nurseryUserIdOrProfileId: string | Types.ObjectId,
+  nurseryUserIdOrProfileId: string | Types.ObjectId | (string | Types.ObjectId)[],
   isActive: boolean
 ): Promise<number> => {
   try {
-    const resolved = await resolveNurseryIdentity(nurseryUserIdOrProfileId);
-    const idStrings = resolved.allIds.map((id) => id.toString());
-    const idObjectIds = resolved.allIds;
+    const rawInputs = Array.isArray(nurseryUserIdOrProfileId)
+      ? nurseryUserIdOrProfileId
+      : [nurseryUserIdOrProfileId];
+
+    const inputObjectIds = rawInputs
+      .map((i) => i?.toString().trim())
+      .filter((s): s is string => Boolean(s) && mongoose.Types.ObjectId.isValid(s))
+      .map((s) => new Types.ObjectId(s));
+
+    if (inputObjectIds.length === 0) return 0;
+
+    // Find all matching profiles for any of these IDs (either as _id or as nursery User reference)
+    const profiles = await NurseryProfile.find({
+      $or: [
+        { _id: { $in: inputObjectIds } },
+        { nursery: { $in: inputObjectIds } },
+      ],
+    })
+      .select("_id nursery")
+      .lean();
+
+    const allObjectIdSet = new Set<string>();
+    inputObjectIds.forEach((id) => allObjectIdSet.add(id.toString()));
+
+    profiles.forEach((p: any) => {
+      if (p._id) allObjectIdSet.add(p._id.toString());
+      if (p.nursery) {
+        const uId = p.nursery._id ? p.nursery._id.toString() : p.nursery.toString();
+        allObjectIdSet.add(uId);
+      }
+    });
+
+    const idStrings = Array.from(allObjectIdSet);
+    const idObjectIds = idStrings.map((s) => new Types.ObjectId(s));
     const allQueryIds = [...idStrings, ...idObjectIds];
 
     const result = await Product.updateMany(
@@ -255,12 +290,18 @@ export const syncNurseryProductsActiveStatus = async (
           { nursery: { $in: allQueryIds } },
           { nurseryId: { $in: allQueryIds } },
           { vendor: { $in: allQueryIds } },
+          { vendorId: { $in: allQueryIds } },
         ],
       },
       { $set: { isNurseryActive: isActive } }
     );
-    await invalidateNurseryCache(resolved.profileId.toString());
-    await invalidateNurseryCache(resolved.userId.toString());
+
+    // Invalidate caches across all identified IDs
+    await Promise.all(idStrings.map((id) => invalidateNurseryCache(id)));
+
+    // ⚡ Trigger Next.js on-demand edge revalidation immediately
+    await triggerFrontendRevalidation().catch(() => {});
+
     return result.modifiedCount;
   } catch (err: any) {
     console.error("Failed to sync nursery products active status:", err);
