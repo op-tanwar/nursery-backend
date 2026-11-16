@@ -1046,6 +1046,450 @@ export const getProductByIdOrSlug = catchAsyncErrors(
   }
 );
 
+// ======================================================================
+// 🎯 SMART PRODUCT RECOMMENDATION & CROSS-SELL AFFINITY ENGINE
+// ======================================================================
+
+export const CROSS_SELL_AFFINITY_MATRIX: Record<string, string[]> = {
+  plants: ["pots", "plant-care", "accessories", "plant-stands-shelves"],
+  pots: ["plants", "plant-care", "plant-stands-shelves", "accessories"],
+  "pots-planters": ["plants", "plant-care", "plant-stands-shelves", "accessories"],
+  "gardening-tools": ["plant-care", "seeds-bulbs", "accessories", "gardening-tools"],
+  "plant-care": ["plants", "seeds-bulbs", "gardening-tools", "pots"],
+  "seeds-bulbs": ["plant-care", "pots", "gardening-tools", "accessories"],
+  "plant-stands-shelves": ["pots", "plants", "accessories"],
+  "stands-shelves": ["pots", "plants", "accessories"],
+  "plant-stands-and-shelves": ["pots", "plants", "accessories"],
+  "artificial-dried-plants": ["pots", "plant-stands-shelves", "accessories"],
+  "artificial-dried": ["pots", "plant-stands-shelves", "accessories"],
+  accessories: ["plants", "pots", "plant-care", "gardening-tools"],
+};
+
+export function getCategoryDbQueryFilter(categorySlug: string): any {
+  const norm = normalizeCategorySlug(categorySlug) || categorySlug.toLowerCase().trim();
+  if (norm === "pots" || norm === "pots-planters") {
+    return { $in: ["pots", "pots-planters"] };
+  }
+  if (
+    norm === "plant-stands-shelves" ||
+    norm === "stands-shelves" ||
+    norm === "plant-stands-and-shelves"
+  ) {
+    return { $in: ["plant-stands-shelves", "stands-shelves", "plant-stands-and-shelves"] };
+  }
+  if (norm === "artificial-dried" || norm === "artificial-dried-plants") {
+    return { $in: ["artificial-dried", "artificial-dried-plants"] };
+  }
+  return norm;
+}
+
+/**
+ * 🎯 GET PRODUCT RECOMMENDATIONS (CROSS-SELL & SIMILAR COLLECTIONS)
+ * GET /api/v1/products/:idOrSlug/recommendations
+ */
+export const getProductRecommendations = catchAsyncErrors(
+  async (req: Request, res: Response, next: NextFunction) => {
+    const rawParam = req.params.idOrSlug;
+    const param = String(Array.isArray(rawParam) ? rawParam[0] : rawParam).trim();
+
+    if (!param) {
+      return next(new ErrorHandler("Product ID or slug is required.", 400));
+    }
+
+    const requestedLimit = Number(req.query.limit);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(Math.floor(requestedLimit), 12)
+        : 4;
+
+    const requestedCrossLimit = Number(req.query.crossLimit);
+    const crossLimit =
+      Number.isFinite(requestedCrossLimit) && requestedCrossLimit > 0
+        ? Math.min(Math.floor(requestedCrossLimit), 8)
+        : 3;
+
+    // 1. Look up the source product
+    let product: any = null;
+    if (mongoose.Types.ObjectId.isValid(param)) {
+      product = await Product.findById(param)
+        .populate(
+          "nursery",
+          "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked"
+        )
+        .lean();
+    }
+    if (!product) {
+      product = await Product.findOne({ slug: param.toLowerCase() })
+        .populate(
+          "nursery",
+          "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked"
+        )
+        .lean();
+    }
+    if (!product) {
+      const slugResult = await resolveSlugOrRedirect(Product, param, res, {
+        baseRoute: "/products",
+      });
+      if (slugResult.redirected) return;
+      if (slugResult.doc) {
+        product = await Product.findById(slugResult.doc._id)
+          .populate(
+            "nursery",
+            "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked"
+          )
+          .lean();
+      }
+    }
+
+    if (!product) {
+      return next(new ErrorHandler("Product not found.", 404));
+    }
+
+    // 2. Validate product & nursery availability for public storefront
+    const isOwner = await isProductOwner(product.nursery, req.user);
+    if (!isOwner && req.user?.role !== "admin") {
+      if (
+        product.isPublished !== true ||
+        product.isActive !== true ||
+        product.isNurseryActive !== true
+      ) {
+        return next(
+          new ErrorHandler("Product not found or currently unavailable.", 404)
+        );
+      }
+
+      if (!product.nursery) {
+        return next(
+          new ErrorHandler("Product not found or currently unavailable.", 404)
+        );
+      }
+
+      const nurseryRef =
+        typeof product.nursery === "object" && product.nursery._id
+          ? product.nursery._id.toString()
+          : product.nursery.toString();
+      const isLive = await isNurseryLiveAndActive(nurseryRef);
+      if (!isLive) {
+        return next(
+          new ErrorHandler("Product not found or currently unavailable.", 404)
+        );
+      }
+    }
+
+    // 3. Base candidate filter (strictly active nursery, published, active, in-stock)
+    const activeNurseryIds = await getActiveNurseryIds();
+    const activeObjectIds = activeNurseryIds
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+    const allActiveNurseryIds = [...activeNurseryIds, ...activeObjectIds];
+
+    const baseCandidateFilter: any = {
+      _id: { $ne: product._id },
+      isPublished: true,
+      isActive: true,
+      isNurseryActive: true,
+      stock: { $gt: 0 },
+    };
+    if (allActiveNurseryIds.length > 0) {
+      baseCandidateFilter.nursery = { $in: allActiveNurseryIds };
+    }
+
+    const rawCat = product.category || "";
+    const canonicalCat =
+      normalizeCategorySlug(rawCat) || rawCat.toLowerCase().trim();
+    const isArtificial =
+      canonicalCat === "artificial-dried" ||
+      canonicalCat === "artificial-dried-plants";
+
+    // ------------------------------------------------------------------
+    // 🛒 A. FREQUENTLY BOUGHT TOGETHER (CROSS-SELL COMPLEMENTARY PAIRS)
+    // ------------------------------------------------------------------
+    const affinityCategories =
+      CROSS_SELL_AFFINITY_MATRIX[canonicalCat] || [
+        "pots",
+        "plant-care",
+        "accessories",
+        "plant-stands-shelves",
+      ];
+
+    const pickedCrossMap = new Map<string, any>();
+    const pickedCategoryCounts = new Map<string, number>();
+
+    // Pass 1: Fetch top 2 candidates per complementary category and pick 1 per category
+    for (const cat of affinityCategories) {
+      if (pickedCrossMap.size >= crossLimit) break;
+
+      const catQuery = getCategoryDbQueryFilter(cat);
+      const candidates = await Product.find({
+        ...baseCandidateFilter,
+        category: catQuery,
+        _id: {
+          $nin: [
+            product._id,
+            ...Array.from(pickedCrossMap.keys()).map(
+              (id) => new mongoose.Types.ObjectId(id)
+            ),
+          ],
+        },
+      })
+        .sort({ ratingsAverage: -1, sold: -1, createdAt: -1 })
+        .limit(2)
+        .populate(
+          "nursery",
+          "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked"
+        )
+        .lean();
+
+      if (candidates.length > 0) {
+        const primary = candidates[0];
+        pickedCrossMap.set(primary._id.toString(), primary);
+        pickedCategoryCounts.set(cat, (pickedCategoryCounts.get(cat) || 0) + 1);
+      }
+    }
+
+    // Pass 2: If still fewer than crossLimit, backfill from affinity categories without exceeding
+    if (pickedCrossMap.size < crossLimit) {
+      for (const cat of affinityCategories) {
+        if (pickedCrossMap.size >= crossLimit) break;
+        const catQuery = getCategoryDbQueryFilter(cat);
+        const moreCandidates = await Product.find({
+          ...baseCandidateFilter,
+          category: catQuery,
+          _id: {
+            $nin: [
+              product._id,
+              ...Array.from(pickedCrossMap.keys()).map(
+                (id) => new mongoose.Types.ObjectId(id)
+              ),
+            ],
+          },
+        })
+          .sort({ ratingsAverage: -1, sold: -1, createdAt: -1 })
+          .limit(crossLimit - pickedCrossMap.size)
+          .populate(
+            "nursery",
+            "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked"
+          )
+          .lean();
+
+        for (const cand of moreCandidates) {
+          if (pickedCrossMap.size >= crossLimit) break;
+          pickedCrossMap.set(cand._id.toString(), cand);
+        }
+      }
+    }
+
+    // Pass 3 (Ultimate Fallback): Backfill from general active store items, respecting artificial exclusions
+    if (pickedCrossMap.size < crossLimit) {
+      const fallbackQuery: any = {
+        ...baseCandidateFilter,
+        _id: {
+          $nin: [
+            product._id,
+            ...Array.from(pickedCrossMap.keys()).map(
+              (id) => new mongoose.Types.ObjectId(id)
+            ),
+          ],
+        },
+      };
+      if (isArtificial) {
+        fallbackQuery.category = { $nin: ["plant-care", "seeds-bulbs"] };
+      }
+      const genericFallbacks = await Product.find(fallbackQuery)
+        .sort({ ratingsAverage: -1, sold: -1, createdAt: -1 })
+        .limit(crossLimit - pickedCrossMap.size)
+        .populate(
+          "nursery",
+          "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked"
+        )
+        .lean();
+
+      for (const cand of genericFallbacks) {
+        if (pickedCrossMap.size >= crossLimit) break;
+        pickedCrossMap.set(cand._id.toString(), cand);
+      }
+    }
+
+    const frequentlyBoughtTogether = Array.from(pickedCrossMap.values());
+
+    // ------------------------------------------------------------------
+    // 🌿 B. SIMILAR COLLECTIONS YOU MAY LIKE (SAME-CATEGORY ALTERNATIVES)
+    // ------------------------------------------------------------------
+    const sameCategoryQuery = getCategoryDbQueryFilter(canonicalCat);
+    const similarPool = await Product.find({
+      ...baseCandidateFilter,
+      category: sameCategoryQuery,
+    })
+      .limit(30)
+      .populate(
+        "nursery",
+        "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked"
+      )
+      .lean();
+
+    // Source features extraction
+    const sourceAttrs = (product.attributes || {}) as Record<string, any>;
+    const sourceSub = (
+      sourceAttrs.subCategory ||
+      sourceAttrs.plantType ||
+      ""
+    )
+      .toString()
+      .toLowerCase()
+      .trim();
+    const sourceMat = (sourceAttrs.material || "")
+      .toString()
+      .toLowerCase()
+      .trim();
+    const sourceLight = (sourceAttrs.lightRequirement || "")
+      .toString()
+      .toLowerCase()
+      .trim();
+    const sourceMaint = (sourceAttrs.maintenanceLevel || "")
+      .toString()
+      .toLowerCase()
+      .trim();
+    const sourceToolType = (sourceAttrs.toolType || "")
+      .toString()
+      .toLowerCase()
+      .trim();
+    const sourceForm = (sourceAttrs.formType || "")
+      .toString()
+      .toLowerCase()
+      .trim();
+    const sourceSeedType = (sourceAttrs.seedType || "")
+      .toString()
+      .toLowerCase()
+      .trim();
+    const sourcePrice = Number(product.price) || 0;
+    const sourceTags = Array.isArray(product.tags)
+      ? product.tags.map((t: string) => String(t).toLowerCase().trim())
+      : [];
+
+    // Intelligent relevance scoring
+    const scoredSimilar = similarPool.map((cand: any) => {
+      let score = 0;
+      const candAttrs = (cand.attributes || {}) as Record<string, any>;
+      const candSub = (
+        candAttrs.subCategory ||
+        candAttrs.plantType ||
+        ""
+      )
+        .toString()
+        .toLowerCase()
+        .trim();
+      const candMat = (candAttrs.material || "")
+        .toString()
+        .toLowerCase()
+        .trim();
+      const candLight = (candAttrs.lightRequirement || "")
+        .toString()
+        .toLowerCase()
+        .trim();
+      const candMaint = (candAttrs.maintenanceLevel || "")
+        .toString()
+        .toLowerCase()
+        .trim();
+      const candToolType = (candAttrs.toolType || "")
+        .toString()
+        .toLowerCase()
+        .trim();
+      const candForm = (candAttrs.formType || "")
+        .toString()
+        .toLowerCase()
+        .trim();
+      const candSeedType = (candAttrs.seedType || "")
+        .toString()
+        .toLowerCase()
+        .trim();
+      const candTags = Array.isArray(cand.tags)
+        ? cand.tags.map((t: string) => String(t).toLowerCase().trim())
+        : [];
+
+      // 1. Subcategory / plantType match
+      if (sourceSub && candSub && sourceSub === candSub) {
+        score += 50;
+      } else if (sourceSub && candTags.includes(sourceSub)) {
+        score += 30;
+      }
+
+      // 2. Material match (pots, shelves, tools)
+      if (sourceMat && candMat && sourceMat === candMat) {
+        score += 25;
+      }
+
+      // 3. Category-specific attribute synergy
+      if (sourceLight && candLight && sourceLight === candLight) score += 20;
+      if (sourceMaint && candMaint && sourceMaint === candMaint) score += 15;
+      if (sourceToolType && candToolType && sourceToolType === candToolType) score += 35;
+      if (sourceForm && candForm && sourceForm === candForm) score += 30;
+      if (sourceSeedType && candSeedType && sourceSeedType === candSeedType) score += 30;
+
+      // 4. Price bracket proximity (±35%)
+      if (sourcePrice > 0) {
+        const candPrice = Number(cand.price) || 0;
+        const diffRatio = Math.abs(candPrice - sourcePrice) / sourcePrice;
+        if (diffRatio <= 0.35) {
+          score += Math.round(25 * (1 - diffRatio));
+        } else {
+          score += Math.max(0, Math.round(10 * (1 - Math.min(diffRatio, 1))));
+        }
+      }
+
+      // 5. Shared tags
+      if (sourceTags.length > 0 && candTags.length > 0) {
+        const commonTags = sourceTags.filter((t: string) => candTags.includes(t));
+        score += commonTags.length * 10;
+      }
+
+      // 6. Rating & popularity bonus
+      score += Math.round((cand.ratingsAverage || 4.5) * 2);
+      score += Math.min(cand.sold || 0, 10);
+
+      return { product: cand, score };
+    });
+
+    // Sort by relevance score descending
+    scoredSimilar.sort((a, b) => b.score - a.score);
+
+    let similarCollections = scoredSimilar.slice(0, limit).map((s) => s.product);
+
+    // Fallback: If same category didn't have enough items to fulfill limit, backfill from other active catalog products
+    if (similarCollections.length < limit) {
+      const existingIds = [
+        product._id,
+        ...similarCollections.map((p) => p._id),
+      ];
+      const backfillQuery: any = {
+        ...baseCandidateFilter,
+        _id: { $nin: existingIds },
+      };
+      const generalBackfill = await Product.find(backfillQuery)
+        .sort({ ratingsAverage: -1, sold: -1, createdAt: -1 })
+        .limit(limit - similarCollections.length)
+        .populate(
+          "nursery",
+          "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked"
+        )
+        .lean();
+
+      similarCollections = [...similarCollections, ...generalBackfill];
+    }
+
+    res.status(200).json({
+      success: true,
+      sourceProduct: {
+        id: product._id,
+        name: product.name,
+        category: product.category,
+        slug: product.slug,
+      },
+      frequentlyBoughtTogether,
+      similarCollections,
+    });
+  }
+);
+
 /**
  * ✏️ UPDATE PRODUCT
  * PUT /api/v1/products/:id

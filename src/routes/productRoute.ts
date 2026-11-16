@@ -4,6 +4,7 @@ import {
   getAllProducts,
   getFeaturedProducts,
   getProductByIdOrSlug,
+  getProductRecommendations,
   updateProduct,
   deleteProduct,
   getNurseryProducts,
@@ -27,6 +28,7 @@ router.route("/featured").get(getFeaturedProducts);
 router.route("/bestsellers").get(getFeaturedProducts);
 router.route("/category/:category").get(getAllProducts);
 router.route("/nursery/:nurseryId").get(getNurseryProducts);
+router.route("/:idOrSlug/recommendations").get(getProductRecommendations);
 router.route("/:idOrSlug").get(getProductByIdOrSlug);
 
 // Vendor & Admin Management Routes
