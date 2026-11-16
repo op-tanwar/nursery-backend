@@ -130,14 +130,10 @@ export const createRazorpayOrder = catchAsyncErrors(
         return next(new ErrorHandler(`Product "${dbProduct.name}" is currently inactive and cannot be ordered.`, 400));
       }
 
-      if (dbProduct.isNurseryActive !== true) {
-        return next(new ErrorHandler(`Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`, 400));
-      }
-
       // Check vendor status
       if (dbProduct.nursery) {
         const isLive = await isNurseryLiveAndActive(dbProduct.nursery);
-        if (!isLive) {
+        if (!isLive || dbProduct.isNurseryActive === false) {
           return next(new ErrorHandler(`Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`, 400));
         }
       }

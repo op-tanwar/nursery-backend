@@ -183,16 +183,9 @@ export const calculateAndVerifyOrderTotals = async (
       );
     }
 
-    if (dbProduct.isNurseryActive !== true) {
-      throw new ErrorHandler(
-        `Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`,
-        400
-      );
-    }
-
     if (dbProduct.nursery) {
       const isLive = await isNurseryLiveAndActive(dbProduct.nursery);
-      if (!isLive) {
+      if (!isLive || dbProduct.isNurseryActive === false) {
         throw new ErrorHandler(
           `Product "${dbProduct.name}" is unavailable because the nursery is temporarily suspended.`,
           400

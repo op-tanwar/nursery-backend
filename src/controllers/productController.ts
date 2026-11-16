@@ -679,7 +679,7 @@ export const getAllProducts = catchAsyncErrors(
       Product.countDocuments(baseFilter),
       countQuery,
       features.query
-        .populate("nursery", "businessName slug businessAddress.city logo")
+        .populate("nursery", "businessName slug businessAddress.city logo isActive approvalStatus status isBlocked")
         .select("-__v")
         .lean(),
     ]);
@@ -702,8 +702,9 @@ export const getAllProducts = catchAsyncErrors(
 
     res.status(200).json({
       success: true,
-      totalCount: req.user?.role !== "admin" ? finalProducts.length : totalCount,
-      filteredCount: req.user?.role !== "admin" ? finalProducts.length : filteredCount,
+      totalCount,
+      filteredCount,
+      totalProducts: filteredCount,
       resultsPerPage,
       count: finalProducts.length,
       products: finalProducts,
@@ -862,7 +863,7 @@ export const getFeaturedProducts = catchAsyncErrors(
 
       // Query candidate active products in that category matching serviceability
       const candidates = await Product.find(pinFilter)
-        .populate("nursery", "businessName slug businessAddress.city logo")
+        .populate("nursery", "businessName slug businessAddress.city logo isActive approvalStatus status isBlocked")
         .select("-__v")
         .lean();
 
@@ -899,7 +900,7 @@ export const getFeaturedProducts = catchAsyncErrors(
         })
           .sort({ sold: -1, ratingsAverage: -1, ratings: -1, createdAt: -1 })
           .limit(limit - serviceableProducts.length)
-          .populate("nursery", "businessName slug businessAddress.city logo")
+          .populate("nursery", "businessName slug businessAddress.city logo isActive approvalStatus status isBlocked")
           .select("-__v")
           .lean();
 
@@ -910,7 +911,7 @@ export const getFeaturedProducts = catchAsyncErrors(
       serviceableProducts = await Product.find(baseFilter)
         .sort({ sold: -1, ratingsAverage: -1, ratings: -1, createdAt: -1 })
         .limit(limit)
-        .populate("nursery", "businessName slug businessAddress.city logo")
+        .populate("nursery", "businessName slug businessAddress.city logo isActive approvalStatus status isBlocked")
         .select("-__v")
         .lean();
     }
@@ -962,14 +963,14 @@ export const getProductByIdOrSlug = catchAsyncErrors(
     // 1. Direct ObjectId lookup
     if (mongoose.Types.ObjectId.isValid(param)) {
       product = await Product.findById(param)
-        .populate("nursery", "businessName slug businessAddress logo email phone")
+        .populate("nursery", "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked")
         .lean();
     }
 
     // 2. Direct Slug lookup
     if (!product) {
       product = await Product.findOne({ slug: param.toLowerCase() })
-        .populate("nursery", "businessName slug businessAddress logo email phone")
+        .populate("nursery", "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked")
         .lean();
     }
 
@@ -983,7 +984,7 @@ export const getProductByIdOrSlug = catchAsyncErrors(
 
       if (slugResult.doc) {
         product = await Product.findById(slugResult.doc._id)
-          .populate("nursery", "businessName slug businessAddress logo email phone")
+          .populate("nursery", "businessName slug businessAddress logo email phone isActive approvalStatus status isBlocked")
           .lean();
       }
 
@@ -1001,7 +1002,7 @@ export const getProductByIdOrSlug = catchAsyncErrors(
     if (!isOwner && req.user?.role !== "admin") {
       if (
         product.isPublished !== true ||
-        product.isActive === false ||
+        product.isActive !== true ||
         product.isNurseryActive !== true
       ) {
         return next(new ErrorHandler("Product not found or currently unavailable.", 404));

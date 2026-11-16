@@ -163,6 +163,43 @@ export const isNurseryLiveAndActive = async (
 };
 
 /**
+ * 🛡️ Synchronously inspects a loaded nursery profile or user document.
+ * Safely defaults to active unless explicitly suspended or deactivated.
+ */
+export const isNurseryActiveSync = (nursery: any): boolean => {
+  if (!nursery) return true;
+
+  if (typeof nursery === "string") {
+    const lower = nursery.toLowerCase().trim();
+    if (lower === "suspended" || lower === "inactive" || lower === "blocked" || lower === "rejected") {
+      return false;
+    }
+    return true;
+  }
+
+  if (
+    nursery.isActive === false ||
+    nursery.active === false ||
+    nursery.isBlocked === true ||
+    nursery.isSuspended === true
+  ) {
+    return false;
+  }
+
+  const status = String(nursery.status || "").toLowerCase().trim();
+  if (status === "suspended" || status === "inactive" || status === "blocked") {
+    return false;
+  }
+
+  const approvalStatus = String(nursery.approvalStatus || "").toLowerCase().trim();
+  if (approvalStatus === "rejected" || approvalStatus === "suspended" || approvalStatus === "blocked") {
+    return false;
+  }
+
+  return true;
+};
+
+/**
  * 🧹 Invalidate all active nursery ID caches and nursery-specific profile caches
  */
 export const invalidateNurseryCache = async (nurseryId?: string): Promise<void> => {

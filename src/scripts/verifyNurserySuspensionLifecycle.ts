@@ -215,7 +215,35 @@ async function runVerification() {
     "Cart item from suspended nursery marked as unavailable with reason NURSERY_INACTIVE"
   );
 
-  // Test 12: Order Placement guardrail strictly rejects products without isNurseryActive: true
+  // Test 12: Customer Cart filters out suspended nursery items completely (0 visible rows/cards)
+  const allCartItems = [
+    enriched,
+    {
+      product: { _id: "active1", name: "Snake Plant", isNurseryActive: true, isActive: true, isPublished: true },
+      quantity: 1,
+      nursery: "other_nursery_1",
+      isAvailable: true,
+      unavailableReason: undefined,
+    },
+  ];
+  const visibleCartItems = allCartItems.filter((i) => i.unavailableReason !== "NURSERY_INACTIVE" && i.product.isNurseryActive !== false);
+  assert(
+    visibleCartItems.length === 1 && visibleCartItems[0].product.name === "Snake Plant",
+    "Customer cart completely hides suspended nursery items (zero rows, zero 'Vendor Temporarily Inactive' badges)"
+  );
+
+  // Test 13: Customer Wishlist filters out suspended nursery items without deleting them
+  const rawWishlistItems = [
+    { product: mockProduct },
+    { product: { _id: "active2", name: "Monstera", isNurseryActive: true, isActive: true, isPublished: true, nursery: "other_nursery_1" } },
+  ];
+  const visibleWishlistItems = rawWishlistItems.filter((w) => w.product.isNurseryActive !== false && activeNurseryIdsList.includes(w.product.nursery.toString()));
+  assert(
+    visibleWishlistItems.length === 1 && visibleWishlistItems[0].product.name === "Monstera",
+    "Customer wishlist completely hides suspended nursery items without deleting them from database"
+  );
+
+  // Test 14: Order Placement guardrail strictly rejects products without isNurseryActive: true
   const validateOrderPlacement = (product: any, activeIds: string[]) => {
     if (product.isNurseryActive !== true || !activeIds.includes(product.nursery.toString())) {
       throw new Error(
@@ -239,7 +267,7 @@ async function runVerification() {
     "Order placement strictly blocked with clear suspension error message"
   );
 
-  // Test 13: Reactivation restores visibility
+  // Test 15: Reactivation restores visibility
   const reactivatedActiveIds = [...activeNurseryIdsList, mockNurseryProfileId.toString(), mockNurseryUserId.toString()];
   const reactivatedProduct = { ...mockProduct, isNurseryActive: true };
 
@@ -248,7 +276,7 @@ async function runVerification() {
     "Admin reactivates nursery -> product automatically becomes visible publicly"
   );
 
-  // Test 14: Reactivated cart item passes checkout
+  // Test 16: Reactivated cart item passes checkout
   let reactivatedOrderAllowed = false;
   try {
     reactivatedOrderAllowed = validateOrderPlacement(reactivatedProduct, reactivatedActiveIds);

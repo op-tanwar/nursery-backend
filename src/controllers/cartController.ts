@@ -23,6 +23,7 @@ import {
   getActiveNurseryIds,
   invalidateNurseryCache,
   isNurseryLiveAndActive,
+  isNurseryActiveSync,
 } from "../utils/nurseryUtils";
 
 export {
@@ -30,6 +31,7 @@ export {
   getActiveNurseryIds,
   invalidateNurseryCache,
   isNurseryLiveAndActive,
+  isNurseryActiveSync,
 };
 
 // ======================================================================
@@ -55,17 +57,24 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
     };
   }
 
+  // Helper to safely extract string ID from an ObjectId, object, or string
+  const extractId = (val: any): string | null => {
+    if (!val) return null;
+    if (typeof val === "object" && val._id) return String(val._id).trim();
+    return String(val).trim();
+  };
+
   // 1. Collect unique nursery IDs from cart items
   const uniqueNurseryIds: string[] = Array.from(
     new Set(
       rawItems
-        .map((item: any) => item.nursery?.toString() || item.product?.nursery?.toString())
-        .filter((id: any): id is string => Boolean(id))
+        .map((item: any) => extractId(item.nursery) || extractId(item.product?.nursery))
+        .filter((id: any): id is string => Boolean(id) && id !== "undefined" && id !== "null")
     )
   );
 
-  // 2. Fetch cached active nursery IDs, nursery profiles, & user statuses in parallel
-  const [activeNurseryIds, nurseryProfiles, nurseryUsers] = await Promise.all([
+  // 2. Fetch cached active nursery IDs and nursery profiles in parallel
+  const [activeNurseryIds, nurseryProfiles] = await Promise.all([
     getActiveNurseryIds(),
     uniqueNurseryIds.length > 0
       ? NurseryProfile.find({
@@ -74,59 +83,62 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
             { _id: { $in: uniqueNurseryIds as any } },
           ],
         })
-          .select("nursery _id isActive approvalStatus businessName")
-          .lean()
-      : [],
-    uniqueNurseryIds.length > 0
-      ? User.find({ _id: { $in: uniqueNurseryIds as any } })
-          .select("_id isActive isBlocked status")
+          .select("nursery _id isActive approvalStatus businessName isBlocked")
           .lean()
       : [],
   ]);
 
+  // Collect linked user IDs from nursery profiles
+  const allUserIds = Array.from(
+    new Set([
+      ...uniqueNurseryIds,
+      ...nurseryProfiles.map((np: any) => extractId(np.nursery)).filter(Boolean),
+    ])
+  );
+
+  const nurseryUsers = allUserIds.length > 0
+    ? await User.find({ _id: { $in: allUserIds as any } })
+        .select("_id isActive isBlocked status")
+        .lean()
+    : [];
+
   const profileMap = new Map<string, any>();
   for (const np of nurseryProfiles) {
     if (np.nursery) {
-      profileMap.set(np.nursery.toString(), np);
+      profileMap.set(String(np.nursery), np);
     }
     if (np._id) {
-      profileMap.set(np._id.toString(), np);
+      profileMap.set(String(np._id), np);
     }
   }
 
   const userMap = new Map<string, any>();
   for (const u of nurseryUsers) {
-    userMap.set(u._id.toString(), u);
+    userMap.set(String(u._id), u);
   }
 
   const isNurseryActive = (nurseryId?: string | null): boolean => {
-    if (!nurseryId) return false;
-    if (!activeNurseryIds.includes(nurseryId)) {
-      return false;
+    if (!nurseryId) return true; // Direct platform product or unspecified nursery
+    const idStr = nurseryId.toString().trim();
+    if (activeNurseryIds.includes(idStr)) {
+      return true;
     }
-    const profile = profileMap.get(nurseryId);
-    const userId = profile?.nursery ? profile.nursery.toString() : nurseryId;
+
+    const profile = profileMap.get(idStr);
+    const userId = profile?.nursery ? String(profile.nursery) : idStr;
     const userDoc = userMap.get(userId);
 
-    if (
-      profile &&
-      (profile.isActive === false ||
-        profile.approvalStatus !== "Approved" ||
-        profile.isBlocked === true)
-    ) {
-      return false;
+    if (profile) {
+      const isProfileActive = isNurseryActiveSync(profile);
+      if (!isProfileActive) return false;
     }
 
     if (userDoc) {
-      if (userDoc.isActive === false || userDoc.isBlocked === true) {
-        return false;
-      }
-      if (userDoc.status === "Blocked" || userDoc.status === "Suspended") {
-        return false;
-      }
+      const isUserActive = isNurseryActiveSync(userDoc);
+      if (!isUserActive) return false;
     }
 
-    return true;
+    return activeNurseryIds.includes(idStr);
   };
 
   // 3. Dynamically evaluate availability and compute subtotal excluding unavailable items
@@ -140,23 +152,21 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
     let isAvailable = true;
     let unavailableReason: UnavailableReason | undefined = undefined;
 
-    const nurseryId = rawItem.nursery?.toString() || product?.nursery?.toString();
-    const profile = profileMap.get(nurseryId);
-    const nurseryName = profile?.businessName || "Urban Nursery";
+    const nurseryId = extractId(rawItem.nursery) || extractId(product?.nursery);
+    const profile = nurseryId ? profileMap.get(nurseryId) : null;
+    const nurseryName = profile?.businessName || rawItem.nurseryName || "Certified Nursery";
 
-    if (!product || product.isActive === false || product.isPublished === false || product.isNurseryActive !== true) {
+    if (!product || product.isActive === false || product.isPublished === false) {
       isAvailable = false;
-      unavailableReason = product?.isNurseryActive !== true ? "NURSERY_INACTIVE" : "PRODUCT_DISABLED";
+      unavailableReason = "PRODUCT_DISABLED";
+    } else if (product.isNurseryActive === false || (nurseryId && !isNurseryActive(nurseryId))) {
+      isAvailable = false;
+      unavailableReason = "NURSERY_INACTIVE";
     } else {
-      if (!isNurseryActive(nurseryId)) {
+      const availableStock = Math.max(0, (product.stock || 0) - (product.reservedStock || 0));
+      if (availableStock <= 0) {
         isAvailable = false;
-        unavailableReason = "NURSERY_INACTIVE";
-      } else {
-        const availableStock = Math.max(0, (product.stock || 0) - (product.reservedStock || 0));
-        if (availableStock <= 0) {
-          isAvailable = false;
-          unavailableReason = "OUT_OF_STOCK";
-        }
+        unavailableReason = "OUT_OF_STOCK";
       }
     }
 
@@ -167,7 +177,7 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
           : (product.price || 0);
       subtotal += price * (rawItem.quantity || 1);
       availableItemsCount += rawItem.quantity || 1;
-    } else {
+    } else if (unavailableReason !== "NURSERY_INACTIVE") {
       unavailableItemsCount += rawItem.quantity || 1;
     }
 
@@ -179,9 +189,15 @@ export const enrichCartWithAvailability = async (cart: any): Promise<IEnrichedCa
     };
   });
 
+  // 🛡️ Filter out items belonging to inactive/suspended nurseries so they are 100% hidden
+  // They are never rendered, never show any badge, and never count towards totals
+  const visibleItems = enrichedItems.filter(
+    (item) => item.unavailableReason !== "NURSERY_INACTIVE" && item.product?.isNurseryActive !== false
+  );
+
   return {
     ...cartObj,
-    items: enrichedItems,
+    items: visibleItems,
     subtotal: Math.round(subtotal * 100) / 100,
     totalAmount: Math.round(subtotal * 100) / 100,
     availableItemsCount,
@@ -205,7 +221,7 @@ export const checkCartAvailability = async (
 }> => {
   const cart = await Cart.findOne({ user: userId }).populate({
     path: "items.product",
-    select: "name price discountPrice stock nursery isActive",
+    select: "name price discountPrice stock reservedStock slug nursery isActive category isPublished isNurseryActive",
   });
 
   if (!cart || !cart.items || cart.items.length === 0) {
@@ -214,7 +230,7 @@ export const checkCartAvailability = async (
 
   const enriched = await enrichCartWithAvailability(cart);
   const unavailableList = enriched.items
-    .filter((it) => it.isAvailable === false)
+    .filter((it) => it.isAvailable === false && it.unavailableReason !== "NURSERY_INACTIVE")
     .map((it) => ({
       productId: String(it.product?._id || it.product || ""),
       name: it.product?.name || "Product",
@@ -282,7 +298,7 @@ export const addToCart = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished isNurseryActive"
     });
 
     const enrichedCart = await enrichCartWithAvailability(updatedCart);
@@ -327,7 +343,7 @@ export const updateCartQuantity = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished isNurseryActive"
     });
 
     const enrichedCart = await enrichCartWithAvailability(updatedCart);
@@ -340,7 +356,7 @@ export const getMyCart = catchAsyncErrors(
   async (req: Request, res: Response, next: NextFunction) => {
     let cart = await Cart.findOne({ user: req.user?._id }).populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished isNurseryActive"
     });
 
     if (!cart) {
@@ -375,7 +391,7 @@ export const removeFromCart = catchAsyncErrors(
 
     const updatedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished isNurseryActive"
     });
 
     const enrichedCart = await enrichCartWithAvailability(updatedCart);
@@ -433,7 +449,7 @@ export const syncCart = catchAsyncErrors(
     await cart.save();
     const syncedCart = await cart.populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery isActive category isPublished isNurseryActive"
     });
 
     const enrichedCart = await enrichCartWithAvailability(syncedCart);

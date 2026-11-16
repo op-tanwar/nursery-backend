@@ -40,7 +40,7 @@ export const toggleWishlistItem = catchAsyncErrors(
 
       const populatedWishlist = await Wishlist.findById(newWishlist._id).populate({
         path: "items.product",
-        select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished"
+        select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished isNurseryActive"
       });
 
       return res.status(200).json({ success: true, message: "Added to wishlist", wishlist: populatedWishlist });
@@ -58,7 +58,7 @@ export const toggleWishlistItem = catchAsyncErrors(
 
     const populatedWishlist = await Wishlist.findById(wishlist._id).populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished isNurseryActive"
     });
 
     const message = itemIndex > -1 ? "Removed from wishlist" : "Added to wishlist";
@@ -71,27 +71,29 @@ export const getMyWishlist = catchAsyncErrors(
   async (req: Request, res: Response, next: NextFunction) => {
     let wishlist = await Wishlist.findOne({ user: req.user?._id }).populate({
       path: "items.product",
-      select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished"
+      select: "name price discountPrice images coverImage stock reservedStock slug nursery category isActive isPublished isNurseryActive"
     });
 
     if (!wishlist) {
       wishlist = await Wishlist.create({ user: req.user?._id, items: [] });
-    } else if (wishlist.items.length > 0) {
-      // 🛑 सुरक्षा चेक: ब्लॉक की गई नर्सरी के प्रोडक्ट्स को विशलिस्ट ग्रिड से ऑटो-फिल्टर करें (Cached for performance)
-      const activeNurseryIds = await getActiveNurseryIds();
-
-      const originalLength = wishlist.items.length;
-      wishlist.items = wishlist.items.filter((item: any) => {
-        if (!item.product || !item.product.nursery) return false;
-        return activeNurseryIds.includes(item.product.nursery.toString());
-      }) as any;
-
-      if (wishlist.items.length !== originalLength) {
-        await wishlist.save();
-      }
     }
 
-    res.status(200).json({ success: true, wishlist });
+    // 🛑 सुरक्षा चेक: ब्लॉक / इनएक्टिव नर्सरी के प्रोडक्ट्स को विशलिस्ट ग्रिड से ऑटो-फिल्टर करें (बिना डेटा डिलीट किए)
+    const activeNurseryIds = await getActiveNurseryIds();
+    const activeItems = (wishlist.items || []).filter((item: any) => {
+      if (!item.product) return false;
+      if (item.product.isNurseryActive === false) return false;
+      if (item.product.isActive === false || item.product.isPublished === false) return false;
+      if (!item.product.nursery) return true;
+      const nurseryId =
+        typeof item.product.nursery === "object" && item.product.nursery._id
+          ? item.product.nursery._id.toString()
+          : item.product.nursery.toString();
+      return activeNurseryIds.includes(nurseryId);
+    });
+
+    const wishlistObj = (wishlist as any).toObject ? (wishlist as any).toObject() : wishlist;
+    res.status(200).json({ success: true, wishlist: { ...wishlistObj, items: activeItems } });
   }
 );
 
