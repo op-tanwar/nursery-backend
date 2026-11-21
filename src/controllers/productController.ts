@@ -484,8 +484,246 @@ export const createProduct = catchAsyncErrors(
   }
 );
 
+// ======================================================================
+// 🎯 MERCHANDISING RANKING & DIVERSITY ENGINE HELPERS
+// ======================================================================
+
 /**
- * 🔍 GET ALL PRODUCTS (UNIFIED FAST PAGINATED & FILTERED CATALOG)
+ * 🎯 Composite Merchandising & Conversion Scoring Expression for MongoDB Aggregation
+ * Weighted algorithm combining:
+ * 1. In-Stock Priority (+10,000 pts - always puts available stock before OOS)
+ * 2. Category Priority Weight:
+ *    - Tier 1: Plants = 1,000 pts (Core Storefront Hero & conversion anchor)
+ *    - Tier 2: Pots & Planters = 750 pts (High-Attach Companion)
+ *    - Tier 3: Care & Accessories = 550 pts (Daily Care & Impulse Add-ons)
+ *    - Tier 4: Tools, Stands & Seeds = 350 pts (Enthusiast Gear)
+ *    - Tier 5: Artificial & Dried Plants = 150 pts (Niche Decor)
+ * 3. Featured Badge (+120 pts)
+ * 4. Bestseller Badge / High-Sales (+120 pts)
+ * 5. Linear Sales Count (+4 pts / sale, capped at +200 pts)
+ * 6. Social Proof / Ratings (>= 4.8: +180, >= 4.5: +140, >= 4.0: +90, >= 3.5: +40)
+ * 7. Review Count Confidence (>= 20: +70, >= 5: +40, >= 1: +15)
+ * 8. Active Discount / Deal Appeal (Active discount: +40 pts; >= 15% off: +70 pts)
+ */
+export const buildMerchandisingScoreExpression = () => ({
+  $add: [
+    // 1. In-stock priority: in-stock items get 10,000 points
+    {
+      $cond: [{ $gt: ["$stock", 0] }, 10000, 0],
+    },
+
+    // 2. Category Priority Weight
+    {
+      $switch: {
+        branches: [
+          {
+            case: { $in: ["$category", ["plants"]] },
+            then: 1000,
+          },
+          {
+            case: { $in: ["$category", ["pots", "pots-planters"]] },
+            then: 750,
+          },
+          {
+            case: { $in: ["$category", ["accessories", "plant-care"]] },
+            then: 550,
+          },
+          {
+            case: {
+              $in: [
+                "$category",
+                [
+                  "gardening-tools",
+                  "plant-stands-shelves",
+                  "stands-shelves",
+                  "plant-stands-and-shelves",
+                  "seeds-bulbs",
+                ],
+              ],
+            },
+            then: 350,
+          },
+          {
+            case: {
+              $in: ["$category", ["artificial-dried", "artificial-dried-plants"]],
+            },
+            then: 150,
+          },
+        ],
+        default: 100,
+      },
+    },
+
+    // 3. Featured Boost (+120 pts)
+    {
+      $cond: [{ $eq: ["$isFeatured", true] }, 120, 0],
+    },
+
+    // 4. Bestseller / High Sales Boost (+120 pts)
+    {
+      $cond: [
+        {
+          $or: [
+            { $eq: ["$isBestSeller", true] },
+            { $gte: ["$effectiveSales", 20] },
+          ],
+        },
+        120,
+        0,
+      ],
+    },
+
+    // 5. Sales Volume Boost (+4 pts / sale up to +200)
+    {
+      $min: [{ $multiply: ["$effectiveSales", 4] }, 200],
+    },
+
+    // 6. Rating Boost (>= 4.0 prioritized)
+    {
+      $switch: {
+        branches: [
+          { case: { $gte: ["$effectiveRating", 4.8] }, then: 180 },
+          { case: { $gte: ["$effectiveRating", 4.5] }, then: 140 },
+          { case: { $gte: ["$effectiveRating", 4.0] }, then: 90 },
+          { case: { $gte: ["$effectiveRating", 3.5] }, then: 40 },
+        ],
+        default: 0,
+      },
+    },
+
+    // 7. Review Count Confidence Boost
+    {
+      $switch: {
+        branches: [
+          { case: { $gte: ["$effectiveReviews", 20] }, then: 70 },
+          { case: { $gte: ["$effectiveReviews", 5] }, then: 40 },
+          { case: { $gte: ["$effectiveReviews", 1] }, then: 15 },
+        ],
+        default: 0,
+      },
+    },
+
+    // 8. Discount / Deal Appeal Boost
+    {
+      $cond: [
+        {
+          $and: [
+            { $gt: ["$discountPrice", 0] },
+            { $lt: ["$discountPrice", "$price"] },
+          ],
+        },
+        {
+          $cond: [
+            {
+              $gte: [
+                {
+                  $multiply: [
+                    { $divide: [{ $subtract: ["$price", "$discountPrice"] }, "$price"] },
+                    100,
+                  ],
+                },
+                15,
+              ],
+            },
+            70,
+            40,
+          ],
+        },
+        0,
+      ],
+    },
+  ],
+});
+
+/**
+ * 🌿 Category Diversity Interleaver for Default Page 1 & Catalog Views
+ * Prevents "category flooding" (e.g. 20 stands or 24 plants in a row).
+ * Arranges products in an 8-slot repeating high-converting rhythm:
+ * [4 Top Plants, 2 Designer Pots, 1 Plant Care/Accessory, 1 Gear/Stand/Decor]
+ * while keeping each slot sorted by highest merchandisingScore.
+ * Falls back cleanly when any bucket is exhausted and preserves 100% of items.
+ */
+export function applyCategoryDiversityInterleaving<T extends { category: string; stock?: number; merchandisingScore?: number }>(
+  products: T[]
+): T[] {
+  const inStock: T[] = [];
+  const outOfStock: T[] = [];
+
+  for (const p of products) {
+    if ((p.stock ?? 0) > 0) {
+      inStock.push(p);
+    } else {
+      outOfStock.push(p);
+    }
+  }
+
+  const b0_plants: T[] = [];
+  const b1_pots: T[] = [];
+  const b2_care: T[] = [];
+  const b3_gear: T[] = [];
+
+  for (const p of inStock) {
+    const cat = p.category;
+    if (cat === "plants") {
+      b0_plants.push(p);
+    } else if (cat === "pots" || cat === "pots-planters") {
+      b1_pots.push(p);
+    } else if (cat === "accessories" || cat === "plant-care") {
+      b2_care.push(p);
+    } else {
+      b3_gear.push(p);
+    }
+  }
+
+  // 8-item repeating rhythm:
+  // Slots: 0:Plant, 1:Plant, 2:Pot, 3:Plant, 4:Care, 5:Plant, 6:Pot, 7:Gear/Stand
+  const pattern = [0, 0, 1, 0, 2, 0, 1, 3];
+  const buckets = [b0_plants, b1_pots, b2_care, b3_gear];
+  const bucketIndices = [0, 0, 0, 0];
+
+  const interleaved: T[] = [];
+  const totalInStock = inStock.length;
+
+  while (interleaved.length < totalInStock) {
+    let addedInCycle = false;
+
+    for (const targetBucket of pattern) {
+      if (bucketIndices[targetBucket] < buckets[targetBucket].length) {
+        interleaved.push(buckets[targetBucket][bucketIndices[targetBucket]++]);
+        addedInCycle = true;
+      } else {
+        // Fallback: pick the highest merchandisingScore product available from any remaining bucket
+        let bestBucket = -1;
+        let highestScore = -Infinity;
+
+        for (let b = 0; b < buckets.length; b++) {
+          if (bucketIndices[b] < buckets[b].length) {
+            const candidate = buckets[b][bucketIndices[b]];
+            const score = candidate.merchandisingScore ?? 0;
+            if (score > highestScore) {
+              highestScore = score;
+              bestBucket = b;
+            }
+          }
+        }
+
+        if (bestBucket !== -1) {
+          interleaved.push(buckets[bestBucket][bucketIndices[bestBucket]++]);
+          addedInCycle = true;
+        }
+      }
+
+      if (interleaved.length >= totalInStock) break;
+    }
+
+    if (!addedInCycle) break;
+  }
+
+  return [...interleaved, ...outOfStock];
+}
+
+/**
+ * 🔍 GET ALL PRODUCTS (CONVERSION-OPTIMIZED MERCHANDISING CATALOG)
  * GET /api/v1/products
  */
 export const getAllProducts = catchAsyncErrors(
@@ -495,6 +733,9 @@ export const getAllProducts = catchAsyncErrors(
       Number.isFinite(requestedLimit) && requestedLimit > 0
         ? Math.min(Math.floor(requestedLimit), 48)
         : 12;
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const skip = (page - 1) * resultsPerPage;
 
     const {
       category,
@@ -618,8 +859,6 @@ export const getAllProducts = catchAsyncErrors(
     }
 
     // 🚚 Geographic Serviceability & Catalog Pre-filtering Optimization:
-    // If the category is non-perishable (pots, tools, seeds, fertilizers, accessories),
-    // bypass the distance check entirely before hitting the geo module.
     const isNationalCourierCategory =
       normCategory &&
       [
@@ -643,7 +882,6 @@ export const getAllProducts = catchAsyncErrors(
       }
 
       if (cleanCustomerPin) {
-        // Batch pre-fetch distinct serviceable nurseries ONCE per catalog request via Two-Tier cache
         const serviceableNurseryIds = await getServiceableNurseriesForCatalog(cleanCustomerPin);
 
         if (!targetNursery) {
@@ -675,25 +913,234 @@ export const getAllProducts = catchAsyncErrors(
       }
     }
 
-    // Apply ApiFeatures (Safe Regex search, sorting, whitelisted filtering, pagination)
-    const features = new ApiFeatures(Product.find(baseFilter), otherQueries)
-      .search(["name", "category", "description", "tags"])
-      .filter()
-      .sort("-createdAt");
+    // ReDoS-Safe Keyword Search across title, category, description, and tags
+    const rawSearch = (otherQueries.keyword || req.query.keyword || otherQueries.search || req.query.search) as string | undefined;
+    if (rawSearch && typeof rawSearch === "string" && rawSearch.trim()) {
+      const cleanSearch = rawSearch.trim().slice(0, 100);
+      const escaped = cleanSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const searchRegex = new RegExp(escaped, "i");
+      const searchConditions = [
+        { name: searchRegex },
+        { category: searchRegex },
+        { description: searchRegex },
+        { tags: searchRegex },
+      ];
+      if (!baseFilter.$or) {
+        baseFilter.$or = searchConditions;
+      } else if (!baseFilter.$and) {
+        baseFilter.$and = [{ $or: baseFilter.$or }, { $or: searchConditions }];
+        delete baseFilter.$or;
+      } else {
+        baseFilter.$and.push({ $or: searchConditions });
+      }
+    }
 
-    const countQuery = features.query.clone().countDocuments();
-    features.pagination(resultsPerPage);
+    // Graceful offline/disconnected fallback
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(200).json({
+        success: true,
+        totalCount: 0,
+        filteredCount: 0,
+        totalProducts: 0,
+        totalPages: 1,
+        currentPage: page,
+        resultsPerPage,
+        count: 0,
+        products: [],
+      });
+    }
 
-    const [totalCount, filteredCount, rawProducts] = await Promise.all([
-      Product.countDocuments(baseFilter),
-      countQuery,
-      features.query
-        .populate("nursery", "businessName slug businessAddress.city logo isActive approvalStatus status isBlocked")
-        .select("-__v")
-        .lean(),
-    ]);
+    // Parse and determine sorting strategy
+    const rawSort = (otherQueries.sort || req.query.sort) as string | undefined;
+    const cleanSort = typeof rawSort === "string" ? rawSort.toLowerCase().trim() : "";
 
-    // 🛡️ Defense-in-depth: Post-query filter to guarantee zero suspended leaks
+    const isDefaultMerchandisingSort =
+      !cleanSort ||
+      cleanSort === "featured" ||
+      cleanSort === "recommended" ||
+      cleanSort === "default";
+
+    // Map explicit sort parameter to MongoDB aggregation sort specification
+    let sortStage: Record<string, 1 | -1> = { merchandisingScore: -1, createdAt: -1, _id: 1 };
+
+    if (cleanSort === "newest" || cleanSort === "-createdat") {
+      sortStage = { createdAt: -1, _id: 1 };
+    } else if (
+      cleanSort === "price-asc" ||
+      cleanSort === "price_asc" ||
+      cleanSort === "lowtohigh" ||
+      cleanSort === "price"
+    ) {
+      sortStage = { effectivePrice: 1, _id: 1 };
+    } else if (
+      cleanSort === "price-desc" ||
+      cleanSort === "price_desc" ||
+      cleanSort === "hightolow" ||
+      cleanSort === "-price"
+    ) {
+      sortStage = { effectivePrice: -1, _id: 1 };
+    } else if (
+      cleanSort === "rating" ||
+      cleanSort === "top-rated" ||
+      cleanSort === "highest-rated"
+    ) {
+      sortStage = { effectiveRating: -1, effectiveReviews: -1, _id: 1 };
+    } else if (
+      cleanSort === "bestselling" ||
+      cleanSort === "popular" ||
+      cleanSort === "sales"
+    ) {
+      sortStage = { effectiveSales: -1, effectiveRating: -1, _id: 1 };
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // BRANCH A: Default Merchandising Sort on Storefront (Page 1 Category Interleaving)
+    // When no specific category filter is active, apply category interleaving across
+    // in-stock items so the storefront feels like an engaging, diverse boutique.
+    // ──────────────────────────────────────────────────────────────────────────
+    if (isDefaultMerchandisingSort && !normCategory) {
+      const allRankedProducts = await Product.aggregate([
+        { $match: baseFilter },
+        {
+          $addFields: {
+            effectivePrice: {
+              $cond: {
+                if: {
+                  $and: [
+                    { $gt: ["$discountPrice", 0] },
+                    { $lt: ["$discountPrice", "$price"] },
+                  ],
+                },
+                then: "$discountPrice",
+                else: "$price",
+              },
+            },
+            effectiveRating: {
+              $ifNull: ["$ratingsAverage", { $ifNull: ["$ratings", 0] }],
+            },
+            effectiveReviews: {
+              $ifNull: ["$ratingsQuantity", { $ifNull: ["$numOfReviews", 0] }],
+            },
+            effectiveSales: {
+              $ifNull: ["$sold", { $ifNull: ["$soldCount", 0] }],
+            },
+            merchandisingScore: buildMerchandisingScoreExpression(),
+          },
+        },
+        { $sort: { merchandisingScore: -1, createdAt: -1, _id: 1 } },
+        { $project: { __v: 0 } },
+      ]);
+
+      // Apply the high-converting 8-slot interleaving rhythm
+      const interleavedProducts = applyCategoryDiversityInterleaving(allRankedProducts);
+      const filteredCount = interleavedProducts.length;
+      const totalPages = Math.ceil(filteredCount / resultsPerPage) || 1;
+
+      // Deterministic pagination slicing
+      const slicedProducts = interleavedProducts.slice(skip, skip + resultsPerPage);
+
+      // Populate nursery profile details
+      await Product.populate(slicedProducts, {
+        path: "nursery",
+        select: "businessName slug businessAddress.city logo isActive approvalStatus status isBlocked",
+      });
+
+      // 🛡️ Defense-in-depth: Post-query filter to guarantee zero suspended vendor leaks
+      let finalProducts = slicedProducts;
+      if (req.user?.role !== "admin") {
+        const activeSet = new Set(activeNurseryIds);
+        finalProducts = slicedProducts.filter((p: any) => {
+          if (p.isNurseryActive !== true) return false;
+          if (p.isPublished !== true || p.isActive !== true) return false;
+          if (!p.nursery) return false;
+          const nurseryId =
+            typeof p.nursery === "object" && p.nursery._id
+              ? p.nursery._id.toString()
+              : p.nursery.toString();
+          return activeSet.has(nurseryId);
+        });
+      }
+
+      const totalCount = await Product.countDocuments(
+        req.user?.role === "admin" ? {} : { isPublished: true, isActive: true, isNurseryActive: true }
+      );
+
+      return res.status(200).json({
+        success: true,
+        totalCount,
+        filteredCount,
+        totalProducts: filteredCount,
+        totalPages,
+        currentPage: page,
+        resultsPerPage,
+        count: finalProducts.length,
+        products: finalProducts,
+      });
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // BRANCH B: Deterministic MongoDB Aggregation with $facet for:
+    // 1. Explicit sort options (price, rating, bestselling, newest)
+    // 2. Specific category filters (e.g. /shop?type=Pots) where pure merchandising score ranks items
+    // ──────────────────────────────────────────────────────────────────────────
+    const facetSort = isDefaultMerchandisingSort
+      ? { merchandisingScore: -1, createdAt: -1, _id: 1 }
+      : sortStage;
+
+    const pipeline: any[] = [
+      { $match: baseFilter },
+      {
+        $addFields: {
+          effectivePrice: {
+            $cond: {
+              if: {
+                $and: [
+                  { $gt: ["$discountPrice", 0] },
+                  { $lt: ["$discountPrice", "$price"] },
+                ],
+              },
+              then: "$discountPrice",
+              else: "$price",
+            },
+          },
+          effectiveRating: {
+            $ifNull: ["$ratingsAverage", { $ifNull: ["$ratings", 0] }],
+          },
+          effectiveReviews: {
+            $ifNull: ["$ratingsQuantity", { $ifNull: ["$numOfReviews", 0] }],
+          },
+          effectiveSales: {
+            $ifNull: ["$sold", { $ifNull: ["$soldCount", 0] }],
+          },
+          merchandisingScore: buildMerchandisingScoreExpression(),
+        },
+      },
+      { $sort: facetSort },
+      {
+        $facet: {
+          metadata: [{ $count: "total" }],
+          products: [
+            { $skip: skip },
+            { $limit: resultsPerPage },
+            { $project: { __v: 0 } },
+          ],
+        },
+      },
+    ];
+
+    const [facetResult] = await Product.aggregate(pipeline);
+
+    const filteredCount = facetResult?.metadata?.[0]?.total || 0;
+    const rawProducts = facetResult?.products || [];
+    const totalPages = Math.ceil(filteredCount / resultsPerPage) || 1;
+
+    // Populate nursery profile details
+    await Product.populate(rawProducts, {
+      path: "nursery",
+      select: "businessName slug businessAddress.city logo isActive approvalStatus status isBlocked",
+    });
+
+    // 🛡️ Defense-in-depth: Post-query filter to guarantee zero suspended vendor leaks
     let finalProducts = rawProducts;
     if (req.user?.role !== "admin") {
       const activeSet = new Set(activeNurseryIds);
@@ -709,17 +1156,24 @@ export const getAllProducts = catchAsyncErrors(
       });
     }
 
-    res.status(200).json({
+    const totalCount = await Product.countDocuments(
+      req.user?.role === "admin" ? {} : { isPublished: true, isActive: true, isNurseryActive: true }
+    );
+
+    return res.status(200).json({
       success: true,
       totalCount,
       filteredCount,
       totalProducts: filteredCount,
+      totalPages,
+      currentPage: page,
       resultsPerPage,
       count: finalProducts.length,
       products: finalProducts,
     });
   }
 );
+
 
 /**
  * 🌟 GET FEATURED / BEST-SELLING PRODUCTS (GLOBAL OR HYPERLOCAL PINCODE)
